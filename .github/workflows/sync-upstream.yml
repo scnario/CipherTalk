@@ -1,0 +1,48 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    # 每天 UTC 00:00 (北京时间 08:00) 自动同步
+    - cron: '0 0 * * *'
+  workflow_dispatch:  # 支持手动触发
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sync upstream
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # 添加上游仓库
+          git remote add upstream https://github.com/ILoveBingLu/CipherTalk.git || true
+          git fetch upstream
+          
+          # 检查是否有更新
+          LOCAL=$(git rev-parse HEAD)
+          UPSTREAM=$(git rev-parse upstream/main)
+          
+          if [ "$LOCAL" = "$UPSTREAM" ]; then
+            echo "✅ Already up to date"
+            exit 0
+          fi
+          
+          echo "🔄 Syncing from upstream..."
+          git merge upstream/main --no-edit --allow-unrelated-histories || {
+            echo "⚠️ Merge conflict detected, using upstream version"
+            git merge --abort
+            git merge upstream/main -X theirs --no-edit --allow-unrelated-histories
+          }
+          
+          git push origin main
+          echo "✅ Sync completed"
