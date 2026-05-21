@@ -112,7 +112,6 @@ function ExportPage() {
   const loadDefaultExportConfig = useCallback(async () => {
     try {
       const defaultDateRange = await configService.getExportDefaultDateRange()
-      const defaultAvatars = await configService.getExportDefaultAvatars()
 
       // 计算日期范围
       let startDate = ''
@@ -147,12 +146,12 @@ function ExportPage() {
         ...prev,
         startDate,
         endDate,
-        exportAvatars: defaultAvatars
+        exportAvatars: true
       }))
 
       setContactOptions(prev => ({
         ...prev,
-        exportAvatars: defaultAvatars
+        exportAvatars: true
       }))
     } catch (e) {
       console.error('加载默认导出配置失败:', e)
@@ -439,7 +438,7 @@ function ExportPage() {
         exportVoices: options.exportVoices
       }
 
-      if (options.format === 'chatlab' || options.format === 'chatlab-jsonl' || options.format === 'json' || options.format === 'excel' || options.format === 'html') {
+      if (options.format === 'chatlab' || options.format === 'chatlab-jsonl' || options.format === 'json' || options.format === 'excel' || options.format === 'html' || options.format === 'sql') {
         const result = await window.electronAPI.export.exportSessions(
           sessionList,
           exportFolder,

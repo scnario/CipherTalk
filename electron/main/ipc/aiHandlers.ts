@@ -21,6 +21,22 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
     }
   })
 
+  ipcMain.handle('ai:generatePosterTheme', async (_, options: {
+    description: string
+    provider?: string
+    apiKey?: string
+    model?: string
+  }) => {
+    try {
+      const { aiService } = await import('../../services/ai/aiService')
+      const css = await aiService.generatePosterTheme(options)
+      return { success: true, css }
+    } catch (e) {
+      console.error('[AI] 生成海报主题失败:', e)
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  })
+
   // 代理相关
   ipcMain.handle('ai:getProxyStatus', async () => {
     try {
@@ -624,6 +640,16 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
     } catch (e) {
       console.error('[AI] 下载语义模型失败:', e)
       return { success: false, error: String(e) }
+    }
+  })
+
+  ipcMain.handle('ai:cancelEmbeddingModelDownload', async (_, profileId?: string) => {
+    try {
+      const { localEmbeddingModelService } = await import('../../services/search/embeddingModelService')
+      return localEmbeddingModelService.cancelDownloadModel(profileId)
+    } catch (e) {
+      console.error('[AI] 暂停语义模型下载失败:', e)
+      return { success: false, cancelled: false, error: String(e) }
     }
   })
 
