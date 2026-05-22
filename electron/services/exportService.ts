@@ -4,12 +4,13 @@ import * as https from 'https'
 import * as http from 'http'
 import { ConfigService } from './config'
 import { voiceTranscribeService } from './voiceTranscribeService'
-import * as XLSX from 'xlsx'
+import * as ExcelJS from 'exceljs'
 import { HtmlExportGenerator } from './htmlExportGenerator'
 import { imageDecryptService } from './imageDecryptService'
 import { videoService } from './videoService'
 import { dbAdapter } from './dbAdapter'
 import { findMessageDbPaths, findDbByName, getDbStoragePath } from './dbStoragePaths'
+import { snsService, isVideoUrl, type SnsPost, type SnsShareInfo } from './snsService'
 
 // ChatLab 0.0.2 格式类型定义
 export interface ChatLabHeader {
@@ -104,6 +105,28 @@ export interface ContactExportOptions {
     officials: boolean
   }
   selectedUsernames?: string[]
+}
+
+export interface MomentsExportOptions {
+  format: 'json' | 'html' | 'excel'
+  dateRange?: { start: number; end: number } | null
+  usernames?: string[]
+}
+
+export interface MomentExportItem {
+  id: string
+  username: string
+  nickname: string
+  createTime: number
+  formattedTime: string
+  content: string
+  media: { type: 'image' | 'video'; url: string; thumb: string }[]
+  mediaCount: number
+  shareInfo?: SnsShareInfo
+  likes: string[]
+  likeCount: number
+  comments: { nickname: string; content: string; replyTo?: string }[]
+  commentCount: number
 }
 
 export interface ExportProgress {
@@ -435,6 +458,52 @@ class ExportService {
     return /^[A-Za-z0-9+/=]+$/.test(s)
   }
 
+  private coerceRowNumber(value: any, fallback = 0): number {
+    if (value === null || value === undefined || value === '') return fallback
+    if (typeof value === 'number') return Number.isFinite(value) ? value : fallback
+    if (typeof value === 'bigint') return Number(value)
+    const text = String(value).trim()
+    if (!text) return fallback
+    const parsed = Number(text)
+    return Number.isFinite(parsed) ? parsed : fallback
+  }
+
+  private getRowField(row: Record<string, any>, fieldNames: string[]): any {
+    for (const name of fieldNames) {
+      if (row[name] !== undefined && row[name] !== null) return row[name]
+    }
+    const lowerMap = new Map<string, string>()
+    for (const actual of Object.keys(row || {})) {
+      lowerMap.set(actual.toLowerCase(), actual)
+    }
+    for (const name of fieldNames) {
+      const actual = lowerMap.get(name.toLowerCase())
+      if (actual && row[actual] !== undefined && row[actual] !== null) return row[actual]
+    }
+    return undefined
+  }
+
+  /**
+   * 健壮地解析消息的 local_type：兼容不同微信版本的列名与字符串类型值
+   */
+  private resolveMessageLocalType(row: Record<string, any>, fallback = 1): number {
+    const fieldNames = [
+      'local_type', 'localType', 'type', 'Type',
+      'msg_type', 'msgType', 'MsgType',
+      'message_type', 'messageType', 'WCDB_CT_local_type'
+    ]
+    let zeroCandidate: number | undefined
+    for (const fieldName of fieldNames) {
+      const value = this.getRowField(row, [fieldName])
+      if (value === null || value === undefined || value === '') continue
+      const parsed = this.coerceRowNumber(value, Number.NaN)
+      if (!Number.isFinite(parsed)) continue
+      if (parsed > 0) return parsed
+      if (parsed === 0 && zeroCandidate === undefined) zeroCandidate = parsed
+    }
+    return zeroCandidate ?? fallback
+  }
+
   /**
    * 解析消息内容为可读文本
    */
@@ -466,7 +535,10 @@ class ExportService {
         }
         return '[语音消息]'
       }
-      case 42: return '[名片]'
+      case 42: {
+        const nickname = content.match(/nickname="([^"]*)"/)?.[1]
+        return nickname ? `[名片] ${nickname}` : '[名片]'
+      }
       case 43: {
         if (mediaPathMap && createTime && mediaPathMap.has(createTime)) {
           return `[视频] ${mediaPathMap.get(createTime)}`
@@ -477,40 +549,24 @@ class ExportService {
         if (mediaPathMap && createTime && mediaPathMap.has(createTime)) {
           return `[动画表情] ${mediaPathMap.get(createTime)}`
         }
+        // 未导出本地文件时，回退用表情 XML 里的 cdnurl 直接显示（明文直连地址）
+        const emojiCdnUrl = content.match(/cdnurl\s*=\s*"([^"]+)"/i)?.[1]
+        if (emojiCdnUrl) {
+          return `[动画表情] ${this.decodeHtmlEntities(emojiCdnUrl)}`
+        }
         return '[动画表情]'
       }
-      case 48: return '[位置]'
-      case 49: {
-        const title = this.extractXmlValue(content, 'title')
-        const type = this.extractXmlValue(content, 'type')
-
-        // 群公告消息（type 87）
-        if (type === '87') {
-          const textAnnouncement = this.extractXmlValue(content, 'textannouncement')
-          if (textAnnouncement) {
-            return `[群公告] ${textAnnouncement}`
-          }
-          return '[群公告]'
-        }
-
-        // 转账消息特殊处理
-        if (type === '2000') {
-          const feedesc = this.extractXmlValue(content, 'feedesc')
-          const payMemo = this.extractXmlValue(content, 'pay_memo')
-          if (feedesc) {
-            return payMemo ? `[转账] ${feedesc} ${payMemo}` : `[转账] ${feedesc}`
-          }
-          return '[转账]'
-        }
-
-        if (type === '6') return title ? `[文件] ${title}` : '[文件]'
-        if (type === '19') return title ? `[聊天记录] ${title}` : '[聊天记录]'
-        if (type === '33' || type === '36') return title ? `[小程序] ${title}` : '[小程序]'
-        if (type === '57') return title || '[引用消息]'
-        if (type === '5' || type === '49') return title ? `[链接] ${title}` : '[链接]'
-        return title ? `[链接] ${title}` : '[链接]'
+      case 48: {
+        const poiname = content.match(/poiname="([^"]*)"/)?.[1]
+        const label = content.match(/label="([^"]*)"/)?.[1]
+        return poiname ? `[位置] ${poiname}` : label ? `[位置] ${label}` : '[位置]'
       }
-      case 50: return '[通话]'
+      case 49:
+        return this.parseType49(content)
+      case 50: {
+        const msg = this.extractXmlValue(content, 'msg')
+        return msg ? `[通话] ${msg}` : '[通话]'
+      }
       case 10000: return this.cleanSystemMessage(content)
       case 244813135921: {
         // 引用消息
@@ -518,43 +574,79 @@ class ExportService {
         return title || '[引用消息]'
       }
       default:
-        // 对于未知的 localType，检查 XML type 来判断消息类型
+        // 对于未知的 localType，若带 XML type 则按 appmsg（type 49）逻辑解析
         if (xmlType) {
-          const title = this.extractXmlValue(content, 'title')
-
-          // 群公告消息（type 87）
-          if (xmlType === '87') {
-            const textAnnouncement = this.extractXmlValue(content, 'textannouncement')
-            if (textAnnouncement) {
-              return `[群公告] ${textAnnouncement}`
-            }
-            return '[群公告]'
-          }
-
-          // 转账消息
-          if (xmlType === '2000') {
-            const feedesc = this.extractXmlValue(content, 'feedesc')
-            const payMemo = this.extractXmlValue(content, 'pay_memo')
-            if (feedesc) {
-              return payMemo ? `[转账] ${feedesc} ${payMemo}` : `[转账] ${feedesc}`
-            }
-            return '[转账]'
-          }
-
-          // 其他类型
-          if (xmlType === '6') return title ? `[文件] ${title}` : '[文件]'
-          if (xmlType === '19') return title ? `[聊天记录] ${title}` : '[聊天记录]'
-          if (xmlType === '33' || xmlType === '36') return title ? `[小程序] ${title}` : '[小程序]'
-          if (xmlType === '57') return title || '[引用消息]'
-          if (xmlType === '5' || xmlType === '49') return title ? `[链接] ${title}` : '[链接]'
-
-          // 有 title 就返回 title
-          if (title) return title
+          return this.parseType49(content)
         }
-
         // 最后尝试提取文本内容
         return this.stripSenderPrefix(content) || null
     }
+  }
+
+  /**
+   * 解析 appmsg（type 49）消息：转账、红包、礼物、音乐、链接、文件、小程序等
+   */
+  private parseType49(content: string): string {
+    const title = this.extractXmlValue(content, 'title')
+    const type = this.extractXmlValue(content, 'type')
+
+    // 群公告消息（type 87）
+    if (type === '87') {
+      const textAnnouncement = this.extractXmlValue(content, 'textannouncement')
+      return textAnnouncement ? `[群公告] ${textAnnouncement}` : '[群公告]'
+    }
+
+    // 转账消息（type 2000）
+    if (type === '2000') {
+      const feedesc = this.extractXmlValue(content, 'feedesc')
+      const payMemo = this.extractXmlValue(content, 'pay_memo')
+      if (feedesc) {
+        return payMemo ? `[转账] ${feedesc} ${payMemo}` : `[转账] ${feedesc}`
+      }
+      return '[转账]'
+    }
+
+    // 红包消息（type 2001）
+    if (type === '2001') {
+      const greeting = this.extractXmlValue(content, 'receivertitle') || this.extractXmlValue(content, 'sendertitle')
+      return greeting ? `[红包] ${greeting}` : '[红包]'
+    }
+
+    // 微信礼物（type 115）
+    if (type === '115') {
+      const wish = this.extractXmlValue(content, 'wishmessage')
+      const skutitle = this.extractXmlValue(content, 'skutitle')
+      return skutitle
+        ? `[微信礼物] ${wish || '送你一份心意'} - ${skutitle}`
+        : `[微信礼物] ${wish || '送你一份心意'}`
+    }
+
+    // 音乐分享（type 3）
+    if (type === '3') {
+      const des = this.extractXmlValue(content, 'des')
+      return title ? `[音乐] ${title}${des ? ` - ${des}` : ''}` : '[音乐]'
+    }
+
+    if (title) {
+      switch (type) {
+        case '5':
+        case '49':
+          return `[链接] ${title}`
+        case '6':
+          return `[文件] ${title}`
+        case '19':
+          return `[聊天记录] ${title}`
+        case '33':
+        case '36':
+          return `[小程序] ${title}`
+        case '57':
+          // 引用消息，title 就是回复的内容
+          return title
+        default:
+          return title
+      }
+    }
+    return '[消息]'
   }
 
   private stripSenderPrefix(content: string): string {
@@ -695,7 +787,7 @@ class ExportService {
             }
 
             const content = this.decodeMessageContent(row.message_content, row.compress_content)
-            const localType = row.local_type || row.type || 1
+            const localType = this.resolveMessageLocalType(row, 1)
             const senderUsername = row.sender_username || ''
 
             // 判断是否是自己发送
@@ -1338,6 +1430,9 @@ class ExportService {
         switch (xmlType) {
           case '87': return '群公告'
           case '2000': return '转账消息'
+          case '2001': return '红包消息'
+          case '115': return '微信礼物'
+          case '3': return '音乐分享'
           case '5': return '链接消息'
           case '6': return '文件消息'
           case '19': return '聊天记录'
@@ -1449,7 +1544,7 @@ class ExportService {
             }
 
             const content = this.decodeMessageContent(row.message_content, row.compress_content)
-            const localType = row.local_type || row.type || 1
+            const localType = this.resolveMessageLocalType(row, 1)
             const senderUsername = row.sender_username || ''
             const isSend = row.is_send === 1 || senderUsername === cleanedMyWxid
 
@@ -1665,7 +1760,7 @@ class ExportService {
             }
 
             const content = this.decodeMessageContent(row.message_content, row.compress_content)
-            const localType = row.local_type || row.type || 1
+            const localType = this.resolveMessageLocalType(row, 1)
             const senderUsername = row.sender_username || ''
 
             // 判断是否是自己发送的消息
@@ -1790,47 +1885,51 @@ class ExportService {
         excelData.push(row)
       }
 
-      // 创建工作簿
-      const wb = XLSX.utils.book_new()
-      const ws = XLSX.utils.json_to_sheet(excelData)
-
-      // 设置列宽（根据是否导出头像和聊天记录动态调整）
-      const colWidths: any[] = [
-        { wch: 6 },   // 序号
-        { wch: 20 },  // 时间
-        { wch: 12 },  // 日期
-        { wch: 10 },  // 时刻
-        { wch: 6 },   // 星期
-        { wch: 15 },  // 发送者
-        { wch: 25 },  // 微信ID
-        { wch: 12 },  // 消息类型
-        { wch: 50 },  // 消息内容
-        { wch: 8 },   // 原始类型代码
-        { wch: 12 }   // 时间戳
-      ]
-
-      if (options.exportAvatars) {
-        colWidths.push({ wch: 50 })  // 头像链接
-      }
-
-      // 检查是否有聊天记录消息
-      const hasChatRecords = allMessages.some(msg => msg.chatRecordList && msg.chatRecordList.length > 0)
-      if (hasChatRecords) {
-        colWidths.push({ wch: 80 })  // 聊天记录详情
-      }
-
-      ws['!cols'] = colWidths
-
       // 添加工作表（工作表名称最多31个字符，且不能包含特殊字符）
       const sheetName = sessionInfo.displayName
         .substring(0, 31)
         .replace(/[:\\\/\?\*\[\]]/g, '_')
-      XLSX.utils.book_append_sheet(wb, ws, sheetName)
 
-      // 写入文件（使用 buffer 方式，避免 xlsx 直接写文件的问题）
+      // 检查是否有聊天记录消息
+      const hasChatRecords = allMessages.some(msg => msg.chatRecordList && msg.chatRecordList.length > 0)
+
+      // 创建工作簿，并设置列宽（根据是否导出头像和聊天记录动态调整）
+      const workbook = new ExcelJS.Workbook()
+      const worksheet = workbook.addWorksheet(sheetName)
+      const columns: Partial<ExcelJS.Column>[] = [
+        { header: '序号', key: '序号', width: 6 },
+        { header: '时间', key: '时间', width: 20 },
+        { header: '日期', key: '日期', width: 12 },
+        { header: '时刻', key: '时刻', width: 10 },
+        { header: '星期', key: '星期', width: 6 },
+        { header: '发送者', key: '发送者', width: 15 },
+        { header: '微信ID', key: '微信ID', width: 25 },
+        { header: '消息类型', key: '消息类型', width: 12 },
+        { header: '消息内容', key: '消息内容', width: 50 },
+        { header: '原始类型代码', key: '原始类型代码', width: 8 },
+        { header: '时间戳', key: '时间戳', width: 12 }
+      ]
+
+      if (options.exportAvatars) {
+        columns.push({ header: '头像链接', key: '头像链接', width: 50 })
+      }
+
+      if (hasChatRecords) {
+        columns.push({ header: '聊天记录详情', key: '聊天记录详情', width: 80 })
+      }
+
+      worksheet.columns = columns
+      worksheet.addRows(excelData)
+      worksheet.getRow(1).font = { bold: true }
+      worksheet.getColumn('消息内容').alignment = { wrapText: true, vertical: 'top' }
+      if (hasChatRecords) {
+        worksheet.getColumn('聊天记录详情').alignment = { wrapText: true, vertical: 'top' }
+      }
+
+      // 写入文件（使用 buffer 方式，避免直接写文件时被文件句柄占用影响）
       try {
-        const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'buffer' })
-        fs.writeFileSync(outputPath, wbout)
+        const workbookBuffer = await workbook.xlsx.writeBuffer()
+        fs.writeFileSync(outputPath, Buffer.from(workbookBuffer))
       } catch (writeError) {
         console.error('写入文件失败:', writeError)
         return { success: false, error: `文件写入失败: ${String(writeError)}` }
@@ -1901,7 +2000,7 @@ class ExportService {
             }
 
             const content = this.decodeMessageContent(row.message_content, row.compress_content)
-            const localType = row.local_type || row.type || 1
+            const localType = this.resolveMessageLocalType(row, 1)
             const senderUsername = row.sender_username || ''
             const isSend = row.is_send === 1 || senderUsername === cleanedMyWxid
 
@@ -1933,12 +2032,30 @@ class ExportService {
               chatRecordList = this.parseChatHistory(content)
             }
 
+            let parsedContent = this.parseMessageContent(content, localType, sessionId, createTime, options.mediaPathMap)
+
+            // 转账消息：追加 "谁转账给谁" 信息
+            if (parsedContent && parsedContent.startsWith('[转账]')) {
+              const transferDesc = await this.resolveTransferDesc(
+                content,
+                myWxid,
+                new Map<string, string>(),
+                async (username) => {
+                  const info = await this.getContactInfo(username)
+                  return info.displayName || username
+                }
+              )
+              if (transferDesc) {
+                parsedContent = parsedContent.replace('[转账]', `[转账] (${transferDesc})`)
+              }
+            }
+
             allMessages.push({
               timestamp: createTime,
               sender: actualSender,
               senderName: senderInfo.displayName,
               type: localType,
-              content: this.parseMessageContent(content, localType, sessionId, createTime, options.mediaPathMap),
+              content: parsedContent,
               rawContent: content,
               isSend,
               chatRecords: chatRecordList ? this.formatChatRecordsForJson(chatRecordList, options) : undefined
@@ -2109,7 +2226,7 @@ class ExportService {
             }
 
             const content = this.decodeMessageContent(row.message_content, row.compress_content)
-            const localType = row.local_type || row.type || 1
+            const localType = this.resolveMessageLocalType(row, 1)
             const senderUsername = row.sender_username || ''
             const isSend = row.is_send === 1 || senderUsername === cleanedMyWxid
 
@@ -2198,8 +2315,8 @@ class ExportService {
 
       // 建表
       lines.push('-- 清空旧数据（如有）')
-      lines.push(`DELETE FROM messages WHERE session_wxid = ${this.escapeSql(displayName)};`)
-      lines.push(`DELETE FROM sessions WHERE wxid = ${this.escapeSql(displayName)};`)
+      lines.push(`DELETE FROM messages WHERE session_wxid = ${this.escapeSql(sessionId)};`)
+      lines.push(`DELETE FROM sessions WHERE wxid = ${this.escapeSql(sessionId)};`)
       lines.push('')
 
       lines.push('-- 创建会话表')
@@ -2243,7 +2360,7 @@ class ExportService {
       lines.push('-- 插入会话信息')
       const sessCols = ['wxid', 'display_name', 'session_type', 'owner_id', 'message_count', 'first_message_time', 'last_message_time', 'exported_at']
       const sessVals = [
-        this.escapeSql(displayName),
+        this.escapeSql(sessionId),
         this.escapeSql(displayName),
         this.escapeSql(sessionType),
         this.escapeSql(cleanedMyWxid),
@@ -2267,7 +2384,7 @@ class ExportService {
           const batch = allMessages.slice(i, i + BATCH_SIZE)
           const valueRows = batch.map(msg => {
             const vals = [
-              this.escapeSql(displayName),
+              this.escapeSql(sessionId),
               String(msg.localId),
               String(msg.createTime),
               this.escapeSql(msg.formattedTime),
@@ -2448,6 +2565,233 @@ class ExportService {
   }
 
   /**
+   * 导出朋友圈
+   */
+  async exportMoments(
+    outputDir: string,
+    options: MomentsExportOptions,
+    onProgress?: (progress: ExportProgress) => void
+  ): Promise<{ success: boolean; successCount: number; failCount: number; error?: string }> {
+    try {
+      if (!fs.existsSync(outputDir)) {
+        fs.mkdirSync(outputDir, { recursive: true })
+      }
+
+      onProgress?.({ current: 0, total: 100, currentSession: '朋友圈', phase: 'preparing', detail: '正在读取朋友圈数据...' })
+
+      const startTime = options.dateRange?.start
+      const endTime = options.dateRange?.end
+      const usernames = options.usernames && options.usernames.length > 0 ? options.usernames : undefined
+
+      // 分页拉取全部朋友圈
+      const allPosts: SnsPost[] = []
+      const seenIds = new Set<string>()
+      const BATCH = 200
+      let offset = 0
+      while (true) {
+        const res = await snsService.getTimeline(BATCH, offset, usernames, undefined, startTime, endTime)
+        if (!res.success || !res.timeline || res.timeline.length === 0) break
+        for (const post of res.timeline) {
+          const key = post.id || `${post.username}_${post.createTime}`
+          if (seenIds.has(key)) continue
+          seenIds.add(key)
+          allPosts.push(post)
+        }
+        onProgress?.({ current: 50, total: 100, currentSession: '朋友圈', phase: 'exporting', detail: `已读取 ${allPosts.length} 条朋友圈...` })
+        if (res.timeline.length < BATCH) break
+        offset += BATCH
+        await new Promise(resolve => setImmediate(resolve))
+      }
+
+      if (allPosts.length === 0) {
+        return { success: false, successCount: 0, failCount: 0, error: '未找到符合条件的朋友圈数据' }
+      }
+
+      // 按时间倒序
+      allPosts.sort((a, b) => b.createTime - a.createTime)
+
+      onProgress?.({ current: 95, total: 100, currentSession: '朋友圈', phase: 'writing', detail: '正在写入文件...' })
+
+      const timestamp = this.formatTimestamp(Math.floor(Date.now() / 1000)).replace(/[: ]/g, '-')
+      let ext = '.json'
+      if (options.format === 'html') ext = '.html'
+      else if (options.format === 'excel') ext = '.xlsx'
+      const outputPath = path.join(outputDir, `朋友圈导出_${timestamp}${ext}`)
+
+      // 统一处理：所有格式都消费同一份处理过的数据
+      const items = allPosts.map(p => this.buildMomentExportItem(p))
+
+      if (options.format === 'json') {
+        const data = {
+          generator: 'CipherTalk',
+          exportedAt: Math.floor(Date.now() / 1000),
+          total: items.length,
+          moments: items
+        }
+        fs.writeFileSync(outputPath, JSON.stringify(data, null, 2), 'utf-8')
+      } else if (options.format === 'html') {
+        fs.writeFileSync(outputPath, this.buildMomentsHtml(items), 'utf-8')
+      } else {
+        await this.writeMomentsExcel(items, outputPath)
+      }
+
+      onProgress?.({ current: 100, total: 100, currentSession: '朋友圈', phase: 'complete', detail: '导出完成' })
+      return { success: true, successCount: allPosts.length, failCount: 0 }
+    } catch (e) {
+      console.error('ExportService: 朋友圈导出失败:', e)
+      return { success: false, successCount: 0, failCount: 0, error: String(e) }
+    }
+  }
+
+  private buildMomentExportItem(p: SnsPost): MomentExportItem {
+    return {
+      id: p.id,
+      username: p.username,
+      nickname: this.decodeHtmlEntities(p.nickname || p.username),
+      createTime: p.createTime,
+      formattedTime: this.formatTimestamp(p.createTime),
+      content: this.decodeHtmlEntities(p.contentDesc || ''),
+      media: (p.media || []).map(m => ({
+        type: isVideoUrl(m.url) ? 'video' as const : 'image' as const,
+        url: m.url,
+        thumb: m.thumb
+      })),
+      mediaCount: p.media?.length || 0,
+      shareInfo: p.shareInfo,
+      likes: (p.likes || []).map(l => this.decodeHtmlEntities(l)),
+      likeCount: p.likes?.length || 0,
+      comments: (p.comments || []).map(c => ({
+        nickname: this.decodeHtmlEntities(c.nickname || ''),
+        content: this.decodeHtmlEntities(c.content || ''),
+        replyTo: c.refNickname ? this.decodeHtmlEntities(c.refNickname) : undefined
+      })),
+      commentCount: p.comments?.length || 0
+    }
+  }
+
+  private escapeHtmlText(text: string): string {
+    if (!text) return ''
+    return text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+  }
+
+  private buildMomentsHtml(items: MomentExportItem[]): string {
+    const cards = items.map(p => {
+      const time = this.escapeHtmlText(p.formattedTime)
+      const nickname = this.escapeHtmlText(p.nickname)
+      const content = this.escapeHtmlText(p.content).replace(/\n/g, '<br>')
+
+      const mediaHtml = p.media.map(m => {
+        if (m.type === 'video') {
+          return `<video class="m-media" controls src="${this.escapeHtmlText(m.url)}"></video>`
+        }
+        return `<img class="m-media" loading="lazy" src="${this.escapeHtmlText(m.url || m.thumb)}" alt="">`
+      }).join('')
+
+      let shareHtml = ''
+      if (p.shareInfo && (p.shareInfo.title || p.shareInfo.description)) {
+        shareHtml = `<div class="m-share"><div class="m-share-title">${this.escapeHtmlText(p.shareInfo.title || '')}</div><div class="m-share-desc">${this.escapeHtmlText(p.shareInfo.description || '')}</div></div>`
+      }
+
+      const likesHtml = p.likes.length > 0
+        ? `<div class="m-likes">❤ ${this.escapeHtmlText(p.likes.join('、'))}</div>`
+        : ''
+
+      const commentsHtml = p.comments.length > 0
+        ? `<div class="m-comments">${p.comments.map(c => {
+            const who = this.escapeHtmlText(c.nickname)
+            const ref = c.replyTo ? ` 回复 ${this.escapeHtmlText(c.replyTo)}` : ''
+            return `<div class="m-comment"><b>${who}</b>${ref}：${this.escapeHtmlText(c.content)}</div>`
+          }).join('')}</div>`
+        : ''
+
+      return `<div class="m-card">
+  <div class="m-head"><span class="m-name">${nickname}</span><span class="m-time">${time}</span></div>
+  ${content ? `<div class="m-content">${content}</div>` : ''}
+  ${mediaHtml ? `<div class="m-medias">${mediaHtml}</div>` : ''}
+  ${shareHtml}
+  ${likesHtml}
+  ${commentsHtml}
+</div>`
+    }).join('\n')
+
+    return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>朋友圈导出 - CipherTalk</title>
+<style>
+  body { margin:0; background:#f0f2f5; font-family:-apple-system,"Microsoft YaHei",sans-serif; color:#1a1a1a; }
+  .m-wrap { max-width:600px; margin:0 auto; padding:24px 16px; }
+  .m-title { text-align:center; font-size:18px; font-weight:600; margin-bottom:4px; }
+  .m-sub { text-align:center; color:#888; font-size:13px; margin-bottom:20px; }
+  .m-card { background:#fff; border-radius:12px; padding:16px; margin-bottom:14px; box-shadow:0 1px 4px rgba(0,0,0,.06); }
+  .m-head { display:flex; justify-content:space-between; align-items:baseline; margin-bottom:8px; }
+  .m-name { font-weight:600; color:#576b95; }
+  .m-time { font-size:12px; color:#999; }
+  .m-content { font-size:15px; line-height:1.6; white-space:pre-wrap; margin-bottom:10px; }
+  .m-medias { display:flex; flex-wrap:wrap; gap:6px; }
+  .m-media { width:calc(33.33% - 4px); border-radius:6px; object-fit:cover; aspect-ratio:1; }
+  .m-share { background:#f7f7f7; border-radius:8px; padding:10px; margin-top:8px; }
+  .m-share-title { font-weight:600; font-size:14px; }
+  .m-share-desc { color:#888; font-size:13px; margin-top:4px; }
+  .m-likes { margin-top:10px; padding-top:8px; border-top:1px solid #eee; color:#576b95; font-size:13px; }
+  .m-comments { margin-top:8px; background:#f7f7f7; border-radius:8px; padding:8px 10px; }
+  .m-comment { font-size:13px; line-height:1.7; }
+  .m-comment b { color:#576b95; }
+</style>
+</head>
+<body>
+<div class="m-wrap">
+  <div class="m-title">朋友圈导出</div>
+  <div class="m-sub">CipherTalk · 共 ${items.length} 条 · ${this.escapeHtmlText(this.formatTimestamp(Math.floor(Date.now() / 1000)))}</div>
+  ${cards}
+</div>
+</body>
+</html>`
+  }
+
+  private async writeMomentsExcel(items: MomentExportItem[], outputPath: string): Promise<void> {
+    const workbook = new ExcelJS.Workbook()
+    const sheet = workbook.addWorksheet('朋友圈')
+    sheet.columns = [
+      { header: '时间', key: 'time', width: 20 },
+      { header: '昵称', key: 'nickname', width: 18 },
+      { header: 'wxid', key: 'username', width: 24 },
+      { header: '内容', key: 'content', width: 50 },
+      { header: '媒体数', key: 'mediaCount', width: 8 },
+      { header: '媒体链接', key: 'media', width: 40 },
+      { header: '点赞数', key: 'likeCount', width: 8 },
+      { header: '点赞人', key: 'likes', width: 30 },
+      { header: '评论数', key: 'commentCount', width: 8 },
+      { header: '评论详情', key: 'comments', width: 50 }
+    ]
+
+    for (const p of items) {
+      sheet.addRow({
+        time: p.formattedTime,
+        nickname: p.nickname,
+        username: p.username,
+        content: p.content,
+        mediaCount: p.mediaCount,
+        media: p.media.map(m => m.url).join('\n'),
+        likeCount: p.likeCount,
+        likes: p.likes.join('、'),
+        commentCount: p.commentCount,
+        comments: p.comments.map(c => `${c.nickname}${c.replyTo ? '回复' + c.replyTo : ''}：${c.content}`).join('\n')
+      })
+    }
+
+    sheet.eachRow(row => { row.alignment = { vertical: 'top', wrapText: true } })
+    sheet.getRow(1).font = { bold: true }
+
+    await workbook.xlsx.writeFile(outputPath)
+  }
+
+  /**
    * 导出会话的媒体文件（图片和视频）
    */
   private async exportMediaFiles(
@@ -2484,50 +2828,35 @@ class ExportService {
     let emojiTotal = 0
     let emojiProcessed = 0
 
-    // 构建查询条件：只查需要的消息类型
-    const typeConditions: string[] = []
-    if (options.exportImages) typeConditions.push('3')
-    if (options.exportVideos) typeConditions.push('43')
-    if (options.exportEmojis) typeConditions.push('47')
+    // 是否需要处理图片/视频/表情
+    const needMedia = options.exportImages || options.exportVideos || options.exportEmojis
 
     // 图片/视频/表情循环（语音在后面独立处理）
-    if (typeConditions.length > 0) {
+    if (needMedia) {
+      // 读取全部消息行（不在 SQL 里按 local_type 过滤，避免列名/类型差异导致漏查）
+      const allRows: any[] = []
+      for (const { tableName, dbPath } of dbTablePairs) {
+        try {
+          const rows = await dbAdapter.all<any>(
+            'message',
+            dbPath,
+            `SELECT * FROM ${tableName} ORDER BY create_time ASC`
+          )
+          allRows.push(...rows)
+        } catch (e) {
+          console.error(`[Export] 读取媒体消息失败:`, e)
+        }
+      }
+
       // 预先统计表情总数
       if (options.exportEmojis) {
-        for (const { tableName, dbPath } of dbTablePairs) {
-          try {
-            const cnt = await dbAdapter.get<any>(
-              'message',
-              dbPath,
-              `SELECT COUNT(*) as c FROM ${tableName} WHERE local_type = 47`
-            )
-            emojiTotal += cnt?.c || 0
-          } catch { }
-        }
+        emojiTotal = allRows.filter(r => this.resolveMessageLocalType(r, 1) === 47).length
         if (emojiTotal > 0) onDetail?.(`正在导出表情包 (共 ${emojiTotal} 个)...`)
       }
 
-      for (const { tableName, dbPath } of dbTablePairs) {
+      for (const row of allRows) {
         try {
-          const hasName2Id = await dbAdapter.get<any>(
-            'message',
-            dbPath,
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='Name2Id'"
-          )
-
-          const typeFilter = typeConditions.map(t => `local_type = ${t}`).join(' OR ')
-
-          // 用 SELECT * 获取完整行，包含 packed_info_data
-          let sql: string
-          if (hasName2Id) {
-            sql = `SELECT m.* FROM ${tableName} m WHERE (${typeFilter}) ORDER BY m.create_time ASC`
-          } else {
-            sql = `SELECT * FROM ${tableName} WHERE (${typeFilter}) ORDER BY create_time ASC`
-          }
-
-          const rows = await dbAdapter.all<any>('message', dbPath, sql)
-
-          for (const row of rows) {
+          {
             const createTime = row.create_time || 0
 
             // 时间范围过滤
@@ -2537,7 +2866,7 @@ class ExportService {
               }
             }
 
-            const localType = row.local_type || row.type || 1
+            const localType = this.resolveMessageLocalType(row, 1)
             const content = this.decodeMessageContent(row.message_content, row.compress_content)
 
             // 导出图片
@@ -2673,10 +3002,10 @@ class ExportService {
             }
           }
         } catch (e) {
-          console.error(`[Export] 读取媒体消息失败:`, e)
+          // 跳过单行消息的错误
         }
       }
-    } // 结束 typeConditions > 0
+    } // 结束 needMedia
 
     // === 语音导出（独立流程：需要从 MediaDb 读取） ===
     let voiceCount = 0
@@ -2688,18 +3017,23 @@ class ExportService {
 
       onDetail?.('正在导出语音消息...')
 
-      // 1. 收集所有语音消息的 createTime
+      // 1. 收集所有语音消息的 createTime（按 local_type 在 JS 里过滤，兼容列名/类型差异）
       const voiceCreateTimes: number[] = []
       for (const { tableName, dbPath } of dbTablePairs) {
         try {
-          let sql = `SELECT create_time FROM ${tableName} WHERE local_type = 34`
-          if (options.dateRange) {
-            sql += ` AND create_time >= ${options.dateRange.start} AND create_time <= ${options.dateRange.end}`
-          }
-          sql += ` ORDER BY create_time`
-          const rows = await dbAdapter.all<any>('message', dbPath, sql)
+          const rows = await dbAdapter.all<any>(
+            'message',
+            dbPath,
+            `SELECT * FROM ${tableName} ORDER BY create_time ASC`
+          )
           for (const row of rows) {
-            if (row.create_time) voiceCreateTimes.push(row.create_time)
+            if (this.resolveMessageLocalType(row, 1) !== 34) continue
+            const createTime = row.create_time || 0
+            if (!createTime) continue
+            if (options.dateRange && (createTime < options.dateRange.start || createTime > options.dateRange.end)) {
+              continue
+            }
+            voiceCreateTimes.push(createTime)
           }
         } catch { }
       }
