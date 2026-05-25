@@ -7,7 +7,7 @@
 **一款现代化的微信聊天记录查看与分析工具**
 
 [![License](https://img.shields.io/badge/license-CC--BY--NC--SA--4.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-6.0.5-green.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-6.0.6-green.svg)](package.json)
 [![Platform](https://img.shields.io/badge/platform-Windows-0078D6.svg?logo=windows)]()
 [![Electron](https://img.shields.io/badge/Electron-39-47848F.svg?logo=electron)]()
 [![React](https://img.shields.io/badge/React-19-61DAFB.svg?logo=react)]()
@@ -18,7 +18,7 @@
 [功能特性](#-功能特性) • [快速开始](#-快速开始) • [技术栈](#️-技术栈) • [贡献指南](#-贡献指南) • [许可证](#-许可证)
 [![Verified on MseeP](https://mseep.ai/badge.svg)](https://mseep.ai/app/d00c9dc5-12ec-4594-895c-342550430b11)
 
-[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/ilovebinglu-ciphertalk-badge.png)](https://mseep.ai/app/ilovebinglu-ciphertalk)
+[MseeP.ai Security Assessment Badge](https://mseep.ai/app/ilovebinglu-ciphertalk)
 
 [![oosmetrics 分析加速排名前 5](https://api.oosmetrics.com/api/v1/badge/achievement/c3d78809-e411-40e7-ba11-cc1d5ba76259.svg)](https://oosmetrics.com/repo/ILoveBingLu/CipherTalk)
 </div>
