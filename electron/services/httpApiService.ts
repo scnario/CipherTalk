@@ -760,7 +760,10 @@ class HttpApiService {
           sortTimestamp: item.sortTimestamp || 0,
           lastTimestamp: item.lastTimestamp || 0,
           lastMsgType: item.lastMsgType || 0,
-          sessionType
+          sessionType,
+          isPinned: item.isPinned || false,
+          isCollapsed: item.isCollapsed || false,
+          isFoldGroup: item.isFoldGroup || false
         }
       })
 
@@ -1043,7 +1046,8 @@ class HttpApiService {
             const voiceResult = await chatService.getVoiceData(
               sessionId,
               String(base.localId || ''),
-              Number(base.createTime || 0)
+              Number(base.createTime || 0),
+              Number(base.serverId || 0) || undefined
             )
             if (voiceResult.success && voiceResult.data) {
               const baseCacheDir = cachePath || join(process.cwd(), 'cache')

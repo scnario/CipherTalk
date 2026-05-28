@@ -547,7 +547,10 @@ function toSessionItem(session: ChatSession): McpSessionItem {
     lastMessagePreview: session.summary || '',
     unreadCount: Number(session.unreadCount || 0),
     lastTimestamp: Number(session.lastTimestamp || 0),
-    lastTimestampMs: toTimestampMs(Number(session.lastTimestamp || 0))
+    lastTimestampMs: toTimestampMs(Number(session.lastTimestamp || 0)),
+    isPinned: session.isPinned || undefined,
+    isCollapsed: session.isCollapsed || undefined,
+    isFoldGroup: session.isFoldGroup || undefined
   }
 }
 
@@ -1195,10 +1198,11 @@ async function getVideoLocalPath(message: Message): Promise<string | null> {
 async function getVoiceLocalPath(sessionId: string, message: Message): Promise<string | null> {
   const localId = Number(message.localId || 0)
   const createTime = Number(message.createTime || 0)
+  const msgServerId = Number(message.serverId || 0) || undefined
   if (!localId || !createTime) return null
 
   try {
-    const voiceResult = await chatService.getVoiceData(sessionId, String(localId), createTime)
+    const voiceResult = await chatService.getVoiceData(sessionId, String(localId), createTime, msgServerId)
     if (!voiceResult.success || !voiceResult.data) return null
 
     const configService = new ConfigService()
