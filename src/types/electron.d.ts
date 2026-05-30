@@ -1430,79 +1430,110 @@ export interface ElectronAPI {
     onEmbeddingModelDownloadProgress: (callback: (event: EmbeddingModelDownloadProgress) => void) => () => void
   }
 
-  // Agent 通用对话
-  agent: {
-    sendMessage(opts: AgentSendMessageOptions): Promise<AgentSendMessageResult>
-    cancel(requestId: string): Promise<{ success: boolean; error?: string }>
-    listConversations(): Promise<{ success: boolean; conversations?: AgentConversationSummary[]; error?: string }>
-    loadConversation(id: number): Promise<{ success: boolean; messages?: AgentMessageRecord[]; error?: string }>
+  // 统一 AI Agent 对话
+  aiagent: {
+    send(opts: AiAgentSendOptions): Promise<AiAgentSendResult>
+    cancel(requestId: string): Promise<{ success: boolean; requestId?: string; error?: string }>
+    listConversations(scope: AiAgentScope): Promise<{ success: boolean; conversations?: AiAgentConversationSummary[]; error?: string }>
+    loadConversation(id: number): Promise<{ success: boolean; conversation?: AiAgentConversationDetail; error?: string }>
+    newConversation(scope: AiAgentScope, title?: string): Promise<{ success: boolean; id?: number; conversation?: AiAgentConversationDetail; error?: string }>
     deleteConversation(id: number): Promise<{ success: boolean; error?: string }>
-    newConversation(): Promise<{ success: boolean; id?: number; error?: string }>
+    updateTitle(id: number, title: string): Promise<{ success: boolean; error?: string }>
+    getLastConversationId(scope: AiAgentScope): Promise<{ success: boolean; id?: number; error?: string }>
     appendLocalMessages(opts: {
       conversationId?: number
+      scope: AiAgentScope
       messages: Array<{
         role: 'user' | 'assistant'
         content?: string
         blocks?: unknown[]
       }>
     }): Promise<{ success: boolean; conversationId?: number; error?: string }>
-    updateTitle(id: number, title: string): Promise<{ success: boolean; error?: string }>
-    getLastConversationId(): Promise<{ success: boolean; id?: number; error?: string }>
     generateTitle(opts: {
       conversationId: number
       userMessage: string
       assistantResponse: string
-      provider: string
-      apiKey: string
-      model: string
+      provider: AiAgentProviderCfg
     }): Promise<{ success: boolean; title?: string; error?: string }>
     onStreamEvent(cb: (data: { requestId: string; event: AIStreamEvent }) => void): () => void
+    onProgress(cb: (event: AiAgentProgressEvent) => void): () => void
     onDone(cb: (data: { requestId: string; conversationId?: number }) => void): () => void
     onError(cb: (data: { requestId: string; message: string }) => void): () => void
+    onConversationUpdated(cb: (conversation: AiAgentConversationDetail) => void): () => void
     removeListeners(): void
   }
 
 }
 
-export interface AgentSendMessageOptions {
-  requestId?: string
-  conversationId?: number
-  history: Array<{ role: string; content: string }>
-  message: string
+export type AiAgentScope =
+  | { kind: 'session'; sessionId: string; sessionName?: string }
+  | { kind: 'global' }
+
+export interface AiAgentProviderCfg {
   provider: string
   apiKey: string
   model: string
   enableThinking?: boolean
   temperature?: number
-  systemPrompt?: string
-  commandHint?: string
-  readLimit?: number
-  enabledTools?: Array<{ type: string; function: { name: string; description?: string; parameters?: Record<string, unknown> } }>
-  scopedSessions?: Array<{ id: string; name: string }>
-  skillIds?: string[]
 }
 
-export interface AgentSendMessageResult {
+export interface AiAgentSendOptions {
+  requestId: string
+  scope: AiAgentScope
+  conversationId?: number
+  history: Array<{ role: 'user' | 'assistant'; content: string }>
+  message: string
+  provider: AiAgentProviderCfg
+  commandHint?: string
+  forceThinking?: boolean
+  readLimit?: number
+  skillIds?: string[]
+  scopedSessions?: Array<{ id: string; name: string }>
+}
+
+export interface AiAgentSendResult {
   success: boolean
   requestId: string
   conversationId?: number
   error?: string
 }
 
-export interface AgentConversationSummary {
+export interface AiAgentProgressEvent {
+  id: string
+  stage: string
+  status: 'running' | 'completed' | 'failed' | string
+  title: string
+  displayName?: string
+  nodeName?: string
+  detail?: string
+  toolName?: string
+  query?: string
+  count?: number
+  createdAt?: number
+  requestId?: string
+  source?: string
+  elapsedMs?: number
+  diagnostics?: string[]
+}
+
+export interface AiAgentConversationSummary {
   id: number
   title: string
   preview: string
   updatedAt: number
 }
 
-export interface AgentMessageRecord {
+export interface AiAgentMessageRecord {
   id: number
   conversationId: number
   role: string
   content: string
   blocksJson?: string | null
   createdAt: number
+}
+
+export interface AiAgentConversationDetail extends AiAgentConversationSummary {
+  messages: AiAgentMessageRecord[]
 }
 
 export interface ExportOptions {
