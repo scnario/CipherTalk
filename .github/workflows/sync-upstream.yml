@@ -8,7 +8,6 @@ on:
 
 permissions:
   contents: write
-  workflows: write
 
 jobs:
   sync:
@@ -45,6 +44,11 @@ jobs:
             git merge --abort
             git merge upstream/main -X theirs --no-edit --allow-unrelated-histories
           }
+          
+          # 回退 .github/workflows/ 的变更（GITHUB_TOKEN 无权推送 workflow 文件）
+          git checkout HEAD~1 -- .github/workflows/ 2>/dev/null && \
+            echo "ℹ️ Skipped workflow file changes (use PAT to sync these)" || \
+            echo "ℹ️ No workflow changes to revert"
           
           git push origin main
           echo "✅ Sync completed"
