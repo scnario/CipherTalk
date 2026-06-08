@@ -38,6 +38,9 @@ jobs:
             exit 0
           fi
           
+          # 记录合并前的 HEAD
+          PRE_MERGE_HEAD=$(git rev-parse HEAD)
+          
           echo "🔄 Syncing from upstream..."
           git merge upstream/main --no-edit --allow-unrelated-histories || {
             echo "⚠️ Merge conflict detected, using upstream version"
@@ -46,7 +49,7 @@ jobs:
           }
           
           # 回退 .github/workflows/ 的变更（GITHUB_TOKEN 无权推送 workflow 文件）
-          git checkout HEAD~1 -- .github/workflows/ 2>/dev/null && \
+          git checkout "$PRE_MERGE_HEAD" -- .github/workflows/ 2>/dev/null && \
             echo "ℹ️ Skipped workflow file changes (use PAT to sync these)" || \
             echo "ℹ️ No workflow changes to revert"
           
