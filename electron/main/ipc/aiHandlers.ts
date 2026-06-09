@@ -48,6 +48,46 @@ function hostFromUrl(url: string): string | null {
   }
 }
 
+function shouldStripProviderMetadata(providerConfig: AgentProviderConfig): boolean {
+  if (providerConfig.providerKind !== 'openai-responses') return false
+  const host = hostFromUrl(providerConfig.baseURL)
+  return providerConfig.name === 'custom' || (host !== null && host !== 'api.openai.com')
+}
+
+function stripRemoteResponseRefs(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => stripRemoteResponseRefs(item))
+  }
+  if (!value || typeof value !== 'object') return value
+
+  const out: Record<string, unknown> = {}
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if (
+      key === 'providerMetadata' ||
+      key === 'callProviderMetadata' ||
+      key === 'resultProviderMetadata' ||
+      key === 'providerOptions' ||
+      key === 'itemId' ||
+      key === 'item_id' ||
+      key === 'responseId' ||
+      key === 'response_id' ||
+      key === 'previousResponseId' ||
+      key === 'previous_response_id'
+    ) {
+      continue
+    }
+    if (typeof child === 'string' && /^(msg|rs|resp)_[A-Za-z0-9_-]+$/.test(child)) {
+      continue
+    }
+    out[key] = stripRemoteResponseRefs(child)
+  }
+  return out
+}
+
+function stripUiMessageProviderMetadata(messages: UIMessage[] = []): UIMessage[] {
+  return stripRemoteResponseRefs(messages) as UIMessage[]
+}
+
 function providerToLogData(providerConfig: AgentProviderConfig): Record<string, unknown> {
   return {
     provider: providerConfig.name,
@@ -114,7 +154,10 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
       stage = 'resolve_provider'
       const providerConfig = resolveProviderConfig(payload.modelConfig)
       stage = 'convert_messages'
-      const messages = await convertToModelMessages(payload.messages)
+      const uiMessages = shouldStripProviderMetadata(providerConfig)
+        ? stripUiMessageProviderMetadata(payload.messages)
+        : payload.messages
+      const messages = await convertToModelMessages(uiMessages)
       const lastUserText = lastUserTextFromUiMessages(payload.messages)
       stage = 'load_context_services'
       const { mcpClientService } = await import('../../services/mcpClientService')
@@ -474,12 +517,24 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
   })
 
   // ========= AI 长期记忆管理（agent_memory.db；纯 DB，无 LLM 依赖）=========
-  ipcMain.handle('memory:list', async (_event, opts?: { sourceType?: 'profile' | 'fact'; sessionId?: string; limit?: number }) => {
+  ipcMain.handle('memory:list', async (_event, opts?: {
+    sourceType?: 'profile' | 'fact' | 'relationship'
+    sourceTypes?: Array<'profile' | 'fact' | 'relationship'>
+    sessionId?: string
+    tags?: string[]
+    withoutTags?: string[]
+    minConfidence?: number
+    limit?: number
+  }) => {
     try {
       const { memoryDatabase } = await import('../../services/memory/memoryDatabase')
       const items = memoryDatabase.listMemoryItems({
         ...(opts?.sourceType ? { sourceType: opts.sourceType } : {}),
+        ...(Array.isArray(opts?.sourceTypes) ? { sourceTypes: opts.sourceTypes } : {}),
         ...(opts?.sessionId ? { sessionId: opts.sessionId } : {}),
+        ...(Array.isArray(opts?.tags) ? { tags: opts.tags } : {}),
+        ...(Array.isArray(opts?.withoutTags) ? { withoutTags: opts.withoutTags } : {}),
+        ...(opts?.minConfidence !== undefined ? { minConfidence: opts.minConfidence } : {}),
         limit: opts?.limit ?? 300,
       })
       return { success: true, items, stats: memoryDatabase.getStats() }
@@ -499,9 +554,10 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
 
   ipcMain.handle('memory:update', async (_event, payload: {
     id: number
-    sourceType?: 'profile' | 'fact'
+    sourceType?: 'profile' | 'fact' | 'relationship'
     content?: string
     importance?: number
+    confidence?: number
     tags?: string[]
   }) => {
     try {
@@ -515,6 +571,7 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
         title: content.slice(0, 40),
         content,
         ...(payload.importance !== undefined ? { importance: payload.importance } : {}),
+        ...(payload.confidence !== undefined ? { confidence: payload.confidence } : {}),
         ...(Array.isArray(payload.tags) ? { tags: payload.tags } : {}),
       })
       return item ? { success: true, item } : { success: false, error: '未找到该记忆' }
@@ -531,6 +588,15 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
       // 管理界面整理：用已建向量做语义去重（不现场补嵌入）+ 超量淘汰；未配嵌入则仅超量淘汰
       const semantic = cfg.enabled && cfg.apiKey && cfg.model ? { modelId: cfg.model } : undefined
       return { success: true, result: memoryDatabase.consolidate(50, semantic) }
+    } catch (e) {
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  })
+
+  ipcMain.handle('memory:exportMarkdown', async (_event, outputDir: string) => {
+    try {
+      const { memoryDatabase } = await import('../../services/memory/memoryDatabase')
+      return { success: true, result: memoryDatabase.exportMarkdown(outputDir) }
     } catch (e) {
       return { success: false, error: e instanceof Error ? e.message : String(e) }
     }

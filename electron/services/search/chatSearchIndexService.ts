@@ -3,6 +3,7 @@ import { existsSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { chatService, type Message } from '../chatService'
 import { ConfigService } from '../config'
+import { voiceTranscribeService } from '../voiceTranscribeService'
 
 export type ChatSearchIndexProgressStage =
   | 'preparing_index'
@@ -45,12 +46,15 @@ export interface ChatSearchSessionOptions {
   endTimeMs?: number
   direction?: 'in' | 'out'
   senderUsername?: string
+  maxIndexMessages?: number
+  reusePartialIndex?: boolean
   onProgress?: (progress: ChatSearchIndexProgress) => void | Promise<void>
 }
 
 export interface ChatSearchSessionResult {
   hits: ChatSearchIndexHit[]
   indexedCount: number
+  indexComplete: boolean
   truncated: boolean
 }
 
@@ -137,7 +141,7 @@ function uniqueStrings(values: string[]): string[] {
   return result
 }
 
-function extractMessageSearchText(message: Message): string {
+function extractMessageSearchText(message: Message, transcript?: string): string {
   const chatRecordText = Array.isArray(message.chatRecordList)
     ? message.chatRecordList
       .flatMap((item) => [
@@ -155,7 +159,7 @@ function extractMessageSearchText(message: Message): string {
       case 3:
         return '[图片]'
       case 34:
-        return '[语音]'
+        return transcript || '[语音]'
       case 43:
         return '[视频]'
       case 47:
@@ -168,7 +172,7 @@ function extractMessageSearchText(message: Message): string {
   })()
 
   return [
-    message.parsedContent,
+    transcript || message.parsedContent,
     message.quotedContent,
     message.fileName,
     chatRecordText,
@@ -412,61 +416,79 @@ export class ChatSearchIndexService {
     `)
 
     const row = db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value?: string } | undefined
-    if (row?.value && row.value !== INDEX_SCHEMA_VERSION) {
+    const needsMigration = row?.value && row.value !== INDEX_SCHEMA_VERSION
+
+    if (!needsMigration && row?.value === INDEX_SCHEMA_VERSION && !this.hasHealthySchema(db)) {
+      console.warn('[ChatSearchIndex] 检测到搜索索引 schema 不完整，准备重建')
       this.resetSchema(db)
+    } else if (needsMigration) {
+      try {
+        this.resetSchema(db)
+      } catch (err) {
+        console.warn('[ChatSearchIndex] 迁移清表失败，继续重建:', (err as Error)?.message)
+      }
     }
 
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS message_index (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id TEXT NOT NULL,
-        local_id INTEGER NOT NULL,
-        server_id INTEGER NOT NULL DEFAULT 0,
-        local_type INTEGER NOT NULL DEFAULT 0,
-        create_time INTEGER NOT NULL DEFAULT 0,
-        sort_seq INTEGER NOT NULL DEFAULT 0,
-        is_send INTEGER,
-        sender_username TEXT,
-        parsed_content TEXT NOT NULL DEFAULT '',
-        raw_content TEXT NOT NULL DEFAULT '',
-        search_text TEXT NOT NULL DEFAULT '',
-        token_text TEXT NOT NULL DEFAULT '',
-        message_json TEXT NOT NULL DEFAULT '{}',
-        indexed_at INTEGER NOT NULL,
-        UNIQUE(session_id, local_id, create_time, sort_seq)
-      );
+    const runMigrate = db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS message_index (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id TEXT NOT NULL,
+          local_id INTEGER NOT NULL,
+          server_id INTEGER NOT NULL DEFAULT 0,
+          local_type INTEGER NOT NULL DEFAULT 0,
+          create_time INTEGER NOT NULL DEFAULT 0,
+          sort_seq INTEGER NOT NULL DEFAULT 0,
+          is_send INTEGER,
+          sender_username TEXT,
+          parsed_content TEXT NOT NULL DEFAULT '',
+          raw_content TEXT NOT NULL DEFAULT '',
+          search_text TEXT NOT NULL DEFAULT '',
+          token_text TEXT NOT NULL DEFAULT '',
+          message_json TEXT NOT NULL DEFAULT '{}',
+          indexed_at INTEGER NOT NULL,
+          UNIQUE(session_id, local_id, create_time, sort_seq)
+        );
 
-      CREATE VIRTUAL TABLE IF NOT EXISTS message_index_fts USING fts5(
-        session_id UNINDEXED,
-        cursor_key UNINDEXED,
-        search_text,
-        token_text,
-        tokenize = 'unicode61'
-      );
+        CREATE VIRTUAL TABLE IF NOT EXISTS message_index_fts USING fts5(
+          session_id UNINDEXED,
+          cursor_key UNINDEXED,
+          search_text,
+          token_text,
+          tokenize = 'unicode61'
+        );
 
-      CREATE TABLE IF NOT EXISTS session_index_state (
-        session_id TEXT PRIMARY KEY,
-        newest_sort_seq INTEGER NOT NULL DEFAULT 0,
-        newest_create_time INTEGER NOT NULL DEFAULT 0,
-        newest_local_id INTEGER NOT NULL DEFAULT 0,
-        indexed_count INTEGER NOT NULL DEFAULT 0,
-        updated_at INTEGER NOT NULL,
-        is_complete INTEGER NOT NULL DEFAULT 0
-      );
+        CREATE TABLE IF NOT EXISTS session_index_state (
+          session_id TEXT PRIMARY KEY,
+          newest_sort_seq INTEGER NOT NULL DEFAULT 0,
+          newest_create_time INTEGER NOT NULL DEFAULT 0,
+          newest_local_id INTEGER NOT NULL DEFAULT 0,
+          indexed_count INTEGER NOT NULL DEFAULT 0,
+          updated_at INTEGER NOT NULL,
+          is_complete INTEGER NOT NULL DEFAULT 0
+        );
 
-      CREATE INDEX IF NOT EXISTS idx_message_index_session_time
-        ON message_index(session_id, sort_seq DESC, create_time DESC, local_id DESC);
-      CREATE INDEX IF NOT EXISTS idx_message_index_session_sender
-        ON message_index(session_id, sender_username);
-    `)
+        CREATE INDEX IF NOT EXISTS idx_message_index_session_time
+          ON message_index(session_id, sort_seq DESC, create_time DESC, local_id DESC);
+        CREATE INDEX IF NOT EXISTS idx_message_index_session_sender
+          ON message_index(session_id, sender_username);
+      `)
 
-    db.exec(`
-      DROP TABLE IF EXISTS message_embedding_vec;
-      DROP TABLE IF EXISTS message_vector_index;
-      DROP TABLE IF EXISTS session_vector_state;
-    `)
+      db.exec(`
+        DROP TABLE IF EXISTS message_embedding_vec;
+        DROP TABLE IF EXISTS message_vector_index;
+        DROP TABLE IF EXISTS session_vector_state;
+      `)
 
-    db.prepare('INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)').run('schema_version', INDEX_SCHEMA_VERSION)
+      db.prepare('INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)').run('schema_version', INDEX_SCHEMA_VERSION)
+    })
+
+    try {
+      runMigrate()
+    } catch (err) {
+      console.error('[ChatSearchIndex] schema 迁移失败:', (err as Error)?.message)
+      throw err
+    }
   }
 
   private resetSchema(db: Database.Database): void {
@@ -479,6 +501,38 @@ export class ChatSearchIndexService {
       DROP TABLE IF EXISTS session_index_state;
       DELETE FROM meta WHERE key = 'schema_version';
     `)
+  }
+
+  private rebuildSchema(db: Database.Database): void {
+    this.resetSchema(db)
+    this.ensureSchema(db)
+  }
+
+  private tableExists(db: Database.Database, name: string): boolean {
+    const row = db.prepare(
+      "SELECT 1 AS ok FROM sqlite_master WHERE name = ? AND type IN ('table', 'virtual table') LIMIT 1"
+    ).get(name) as { ok?: number } | undefined
+    return Number(row?.ok || 0) === 1
+  }
+
+  private hasHealthySchema(db: Database.Database): boolean {
+    if (!this.tableExists(db, 'message_index') ||
+      !this.tableExists(db, 'message_index_fts') ||
+      !this.tableExists(db, 'session_index_state')) {
+      return false
+    }
+    try {
+      db.prepare('SELECT rowid FROM message_index_fts LIMIT 0')
+      return true
+    } catch (error) {
+      console.warn('[ChatSearchIndex] FTS 虚表不可用，准备重建:', error instanceof Error ? error.message : String(error))
+      return false
+    }
+  }
+
+  private isMissingSearchIndexTableError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error || '')
+    return /no such table:\s*(?:main\.)?(message_index_fts(?:_[a-z]+)?|message_index|session_index_state)\b/i.test(message)
   }
 
   private getSessionState(db: Database.Database, sessionId: string): ChatSearchIndexState | null {
@@ -576,7 +630,10 @@ export class ChatSearchIndexService {
     const run = db.transaction((items: Message[]) => {
       const indexedAt = Date.now()
       for (const message of items) {
-        const searchText = compactSearchText(extractMessageSearchText(message))
+        const transcript = Number(message.localType) === 34
+          ? voiceTranscribeService.getCachedTranscript(sessionId, message.createTime) || undefined
+          : undefined
+        const searchText = compactSearchText(extractMessageSearchText(message, transcript))
         const tokenText = buildSearchTokens(searchText)
         const payload = {
           sessionId,
@@ -678,10 +735,48 @@ export class ChatSearchIndexService {
 
   async ensureSessionIndexed(
     sessionId: string,
-    onProgress?: ChatSearchSessionOptions['onProgress']
+    onProgress?: ChatSearchSessionOptions['onProgress'],
+    options: { maxMessages?: number; reusePartial?: boolean } = {}
+  ): Promise<ChatSearchIndexState> {
+    try {
+      return await this.ensureSessionIndexedOnce(sessionId, onProgress, options)
+    } catch (error) {
+      if (!this.isMissingSearchIndexTableError(error)) throw error
+      const db = this.getDb()
+      console.warn('[ChatSearchIndex] 搜索索引表缺失，重建缓存后重试:', error instanceof Error ? error.message : String(error))
+      this.rebuildSchema(db)
+      return await this.ensureSessionIndexedOnce(sessionId, onProgress, options)
+    }
+  }
+
+  private async ensureSessionIndexedOnce(
+    sessionId: string,
+    onProgress?: ChatSearchSessionOptions['onProgress'],
+    options: { maxMessages?: number; reusePartial?: boolean } = {}
   ): Promise<ChatSearchIndexState> {
     const db = this.getDb()
     const state = this.getSessionState(db, sessionId)
+    const maxMessages = options.maxMessages && Number.isFinite(options.maxMessages)
+      ? Math.max(1, Math.floor(options.maxMessages))
+      : undefined
+
+    if (
+      options.reusePartial &&
+      state &&
+      !state.isComplete &&
+      state.indexedCount > 0 &&
+      (!maxMessages || state.indexedCount >= maxMessages)
+    ) {
+      await this.report({
+        stage: 'completed',
+        sessionId,
+        message: `使用已有部分搜索索引，共 ${state.indexedCount} 条消息`,
+        messagesScanned: 0,
+        indexedCount: state.indexedCount
+      }, onProgress)
+      return state
+    }
+
     let newest: Message | null = state?.isComplete && state.newestSortSeq > 0
       ? {
         localId: state.newestLocalId,
@@ -773,7 +868,8 @@ export class ChatSearchIndexService {
     db.prepare('DELETE FROM message_index WHERE session_id = ?').run(sessionId)
     db.prepare('DELETE FROM session_index_state WHERE session_id = ?').run(sessionId)
 
-    const firstPage = await chatService.getMessages(sessionId, 0, INDEX_BATCH_SIZE)
+    const batchSize = maxMessages ? Math.min(INDEX_BATCH_SIZE, maxMessages) : INDEX_BATCH_SIZE
+    const firstPage = await chatService.getMessages(sessionId, 0, batchSize)
     if (!firstPage.success) {
       throw new Error(firstPage.error || '建立搜索索引失败')
     }
@@ -793,12 +889,14 @@ export class ChatSearchIndexService {
       }, onProgress)
     }
 
-    while (hasMore && messages.length > 0) {
+    while (hasMore && messages.length > 0 && (!maxMessages || scanned < maxMessages)) {
       const oldest = messages[0]
+      const nextLimit = maxMessages ? Math.min(INDEX_BATCH_SIZE, maxMessages - scanned) : INDEX_BATCH_SIZE
+      if (nextLimit <= 0) break
       const result = await chatService.getMessagesBefore(
         sessionId,
         oldest.sortSeq,
-        INDEX_BATCH_SIZE,
+        nextLimit,
         oldest.createTime,
         oldest.localId
       )
@@ -821,11 +919,14 @@ export class ChatSearchIndexService {
       }, onProgress)
     }
 
-    const nextState = this.updateSessionState(db, sessionId, newest, true)
+    const isComplete = !hasMore || (maxMessages ? scanned < maxMessages : false)
+    const nextState = this.updateSessionState(db, sessionId, newest, isComplete)
     await this.report({
       stage: 'completed',
       sessionId,
-      message: `搜索索引已就绪，共 ${nextState.indexedCount} 条消息`,
+      message: isComplete
+        ? `搜索索引已就绪，共 ${nextState.indexedCount} 条消息`
+        : `已建立部分搜索索引，共 ${nextState.indexedCount} 条消息`,
       messagesScanned: scanned,
       indexedCount: nextState.indexedCount
     }, onProgress)
@@ -834,12 +935,16 @@ export class ChatSearchIndexService {
 
   async searchSession(options: ChatSearchSessionOptions): Promise<ChatSearchSessionResult> {
     const db = this.getDb()
-    const state = await this.ensureSessionIndexed(options.sessionId, options.onProgress)
+    const state = await this.ensureSessionIndexed(options.sessionId, options.onProgress, {
+      maxMessages: options.maxIndexMessages,
+      reusePartial: options.reusePartialIndex
+    })
     const query = normalizeSearchText(options.query)
     if (!query) {
       return {
         hits: [],
         indexedCount: state.indexedCount,
+        indexComplete: state.isComplete,
         truncated: false
       }
     }
@@ -940,7 +1045,8 @@ export class ChatSearchIndexService {
     return {
       hits: hits.slice(0, options.limit),
       indexedCount: state.indexedCount,
-      truncated: rows.length > options.limit
+      indexComplete: state.isComplete,
+      truncated: rows.length > options.limit || !state.isComplete
     }
   }
 
@@ -977,9 +1083,13 @@ export class ChatSearchIndexService {
 
   async listSessionMemoryMessages(
     sessionId: string,
-    onProgress?: ChatSearchSessionOptions['onProgress']
+    onProgress?: ChatSearchSessionOptions['onProgress'],
+    maxIndexMessages?: number
   ): Promise<ChatSearchMemoryMessage[]> {
-    await this.ensureSessionIndexed(sessionId, onProgress)
+    await this.ensureSessionIndexed(sessionId, onProgress, {
+      maxMessages: maxIndexMessages,
+      reusePartial: !!maxIndexMessages
+    })
     const rows = this.getDb().prepare(`
       SELECT
         id,

@@ -11,9 +11,9 @@ import { Sources, SourcesContent, SourcesTrigger } from '@/components/ai-element
 import { HoverCard, HoverCardContent, HoverCardTrigger } from '@/components/ui/hover-card'
 import {
   Conversation,
-  ConversationAutoScroll,
   ConversationContent,
   ConversationEmptyState,
+  ConversationFocusLatestUser,
   ConversationScrollButton,
 } from '@/components/ai-elements/conversation'
 import { Message, MessageAction, MessageActions, MessageAttachment, MessageAttachments, MessageContent, MessageResponse } from '@/components/ai-elements/message'
@@ -175,6 +175,8 @@ const TOOL_LABELS: Record<string, string> = {
   list_memories: '查看记忆',
   forget: '删除记忆',
   consolidate_memory: '整理记忆',
+  search_moments: '搜索朋友圈',
+  moments_stats: '朋友圈统计',
   auto_memory: '自动记忆',
   final_review: '最终审核',
 }
@@ -251,6 +253,163 @@ function toolPartProgressKey(part: unknown, toolName: string) {
     ? (part as { toolCallId: string }).toolCallId
     : undefined
   return toolProgressKey(toolName, toolCallId)
+}
+
+function getDelegateTask(part: unknown): string | undefined {
+  const input = (part as { input?: unknown }).input
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined
+  const task = (input as { task?: unknown }).task
+  return typeof task === 'string' && task.trim() ? task.trim() : undefined
+}
+
+const SUB_AGENT_PROGRESS_LIMIT = 12
+
+function subAgentProgressKey(progress: AgentProgressEvent) {
+  if (progress.toolCallId) return `call:${progress.toolCallId}`
+  if (progress.toolName && (progress.stage === 'tool_started' || progress.stage === 'tool_finished' || progress.stage === 'error')) {
+    return `tool:${progress.depth ?? 0}:${progress.toolName}`
+  }
+  return `event:${progress.depth ?? 0}:${progress.stage}:${progress.title}:${progress.sessionId ?? ''}`
+}
+
+function mergeSubAgentProgress(prev: AgentProgressEvent[], progress: AgentProgressEvent) {
+  const key = subAgentProgressKey(progress)
+  const next = prev.filter((item) => subAgentProgressKey(item) !== key)
+  return [...next, progress].slice(-SUB_AGENT_PROGRESS_LIMIT)
+}
+
+function formatSubAgentStage(progress: AgentProgressEvent) {
+  switch (progress.stage) {
+    case 'tool_started':
+      return '开始'
+    case 'tool_finished':
+      return '完成'
+    case 'indexing':
+      return '索引'
+    case 'searching':
+      return '检索'
+    case 'error':
+      return '出错'
+    case 'run_finished':
+      return '完成'
+    case 'run_started':
+    default:
+      return '启动'
+  }
+}
+
+function formatSubAgentProgressTitle(progress: AgentProgressEvent) {
+  if (progress.toolName) return `${formatToolName(progress.toolName)} · ${formatSubAgentStage(progress)}`
+  return progress.title
+}
+
+function formatSubAgentProgressMeta(progress: AgentProgressEvent): string[] {
+  const meta: string[] = []
+  if (progress.depth != null) meta.push(`深度 ${progress.depth}`)
+  if (progress.messagesScanned != null) meta.push(`扫描 ${progress.messagesScanned} 条`)
+  if (progress.indexedCount != null) meta.push(`索引 ${progress.indexedCount} 条`)
+  if (progress.sessionsScanned != null) meta.push(`会话 ${progress.sessionsScanned}`)
+  if (progress.coverage) meta.push(progress.coverage)
+  if (progress.elapsedMs != null) meta.push(formatElapsed(progress.elapsedMs))
+  if (progress.detail) meta.push(progress.detail)
+  return meta
+}
+
+function subAgentProgressIcon(progress: AgentProgressEvent) {
+  if (progress.stage === 'searching') return Search
+  if (progress.stage === 'indexing') return Sparkles
+  if (progress.stage === 'error') return Info
+  return Wrench
+}
+
+function subAgentProgressDotClass(progress: AgentProgressEvent) {
+  if (progress.stage === 'error') return 'bg-destructive'
+  if (progress.stage === 'tool_finished' || progress.stage === 'run_finished') return 'bg-emerald-500'
+  return 'bg-foreground/70'
+}
+
+function formatProgressTime(value: number) {
+  return new Date(value).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+}
+
+function subAgentPanelTitle(latest: AgentProgressEvent) {
+  if (latest.stage === 'error') return '子助手出错'
+  if (latest.stage === 'run_finished') return '子助手已完成'
+  return '子助手运行中'
+}
+
+function SubAgentProgressPanel({ events, task }: { events: AgentProgressEvent[]; task?: string }) {
+  if (events.length === 0) return null
+  const latestKey = subAgentProgressKey(events[events.length - 1])
+  const latest = events[events.length - 1]
+  const toolCount = new Set(events.map((event) => event.toolName).filter(Boolean)).size
+
+  return (
+    <section
+      aria-live="polite"
+      className="mt-2 rounded-(--agent-radius,12px) border border-border bg-surface/80 px-3 py-2.5 text-xs shadow-xs"
+    >
+      <div className="mb-2 flex min-w-0 items-center gap-2 font-medium text-foreground">
+        <Sparkles className="size-3.5 shrink-0" />
+        <span className="shrink-0">{subAgentPanelTitle(latest)}</span>
+        <span className="min-w-0 truncate text-muted-foreground font-normal">
+          {formatSubAgentProgressTitle(latest)}
+        </span>
+      </div>
+      {task && (
+        <div className="mb-2 rounded-(--agent-radius,12px) bg-muted/50 px-2 py-1.5 text-muted-foreground">
+          <div className="mb-0.5 text-[11px] text-foreground">委托任务</div>
+          <div className="line-clamp-3 whitespace-pre-wrap break-words">{task}</div>
+        </div>
+      )}
+      <div className="mb-2 flex flex-wrap gap-1">
+        <span className="rounded-full bg-muted/60 px-2 py-0.5 text-muted-foreground">{events.length} 条进度</span>
+        {toolCount > 0 && <span className="rounded-full bg-muted/60 px-2 py-0.5 text-muted-foreground">{toolCount} 个工具</span>}
+        <span className="rounded-full bg-muted/60 px-2 py-0.5 text-muted-foreground">最近 {formatProgressTime(latest.at)}</span>
+      </div>
+      <div className="space-y-1">
+        {events.map((progress) => {
+          const Icon = subAgentProgressIcon(progress)
+          const itemKey = subAgentProgressKey(progress)
+          const meta = formatSubAgentProgressMeta(progress)
+          const active = itemKey === latestKey
+            && progress.stage !== 'tool_finished'
+            && progress.stage !== 'run_finished'
+            && progress.stage !== 'error'
+          return (
+            <div
+              className="flex min-w-0 items-start gap-2 rounded-(--agent-radius,12px) px-1.5 py-1 text-muted-foreground"
+              key={itemKey}
+            >
+              <span className="relative mt-0.5 inline-flex size-4 shrink-0 items-center justify-center">
+                <Icon className="size-3.5" />
+                <span className={`absolute -right-0.5 -top-0.5 size-1.5 rounded-full ${subAgentProgressDotClass(progress)} ${active ? 'animate-pulse' : ''}`} />
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="truncate text-foreground">{formatSubAgentProgressTitle(progress)}</span>
+                  <span className="shrink-0 text-[10px] text-muted-foreground">{formatProgressTime(progress.at)}</span>
+                </div>
+                {meta.length > 0 && (
+                  <div className="mt-0.5 flex min-w-0 flex-wrap gap-1">
+                    {meta.map((item) => (
+                      <span
+                        className="max-w-full truncate rounded-(--agent-radius,12px) bg-muted/60 px-1.5 py-0.5"
+                        key={item}
+                        title={item}
+                      >
+                        {item}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </section>
+  )
 }
 
 function collectToolBadges(value: unknown, badges: string[] = []): string[] {
@@ -801,6 +960,7 @@ function resolveDefaultPresetId(
 
 type AgentUsage = {
   inputTokens?: number
+  cacheHitRate?: number
   inputTokenDetails?: {
     noCacheTokens?: number
     cacheReadTokens?: number
@@ -821,6 +981,59 @@ type AgentMessageMetadata = {
   rawFinishReason?: string
   modelProvider?: string
   modelId?: string
+  ciphertalk?: {
+    subAgentProgress?: AgentProgressEvent[]
+  }
+}
+
+function isAgentProgressEvent(value: unknown): value is AgentProgressEvent {
+  if (!value || typeof value !== 'object') return false
+  const item = value as Partial<AgentProgressEvent>
+  return typeof item.stage === 'string'
+    && typeof item.title === 'string'
+    && typeof item.at === 'number'
+}
+
+function readSubAgentProgressFromMessage(message: UIMessage): AgentProgressEvent[] {
+  const metadata = (message as { metadata?: AgentMessageMetadata }).metadata
+  const value = metadata?.ciphertalk?.subAgentProgress
+  return Array.isArray(value) ? value.filter(isAgentProgressEvent) : []
+}
+
+function progressSignature(events: AgentProgressEvent[]): string {
+  return JSON.stringify(events.map((event) => ({
+    stage: event.stage,
+    title: event.title,
+    detail: event.detail,
+    toolName: event.toolName,
+    toolCallId: event.toolCallId,
+    depth: event.depth,
+    at: event.at,
+  })))
+}
+
+function attachSubAgentProgressToLastAssistant(messages: UIMessage[], progress: AgentProgressEvent[]): UIMessage[] {
+  if (progress.length === 0) return messages
+  const targetIndex = [...messages].reverse().findIndex((message) => message.role === 'assistant')
+  if (targetIndex < 0) return messages
+  const index = messages.length - 1 - targetIndex
+  const current = readSubAgentProgressFromMessage(messages[index])
+  if (progressSignature(current) === progressSignature(progress)) return messages
+
+  return messages.map((message, i) => {
+    if (i !== index) return message
+    const metadata = ((message as { metadata?: AgentMessageMetadata }).metadata || {}) as AgentMessageMetadata
+    return {
+      ...message,
+      metadata: {
+        ...metadata,
+        ciphertalk: {
+          ...(metadata.ciphertalk || {}),
+          subAgentProgress: progress,
+        },
+      },
+    } as UIMessage
+  })
 }
 
 function finiteNumber(value: unknown): number | undefined {
@@ -841,6 +1054,10 @@ function formatTokenCount(value: number): string {
 function formatEstimatedCost(value: number): string {
   if (value <= 0) return '约 $0.0000'
   return `约 $${value < 0.01 ? value.toFixed(4) : value.toFixed(3)}`
+}
+
+function formatPercent(value: number): string {
+  return `${Math.round(value * 1000) / 10}%`
 }
 
 function formatFinishReason(value: string): string {
@@ -897,6 +1114,22 @@ function estimateUsageCost(metadata: AgentMessageMetadata, modelInfoByKey: Map<s
   return priced ? total : null
 }
 
+function estimateCacheSavings(metadata: AgentMessageMetadata, modelInfoByKey: Map<string, AIModelInfo>): number | null {
+  const usage = metadata.usage
+  if (!usage) return null
+  const modelInfo = metadata.modelProvider && metadata.modelId
+    ? modelInfoByKey.get(`${metadata.modelProvider}::${metadata.modelId}`) || modelInfoByKey.get(metadata.modelId)
+    : metadata.modelId
+      ? modelInfoByKey.get(metadata.modelId)
+      : undefined
+  const cost = modelInfo?.cost
+  const inputPrice = finiteNumber(cost?.input)
+  const cacheReadPrice = finiteNumber(cost?.cacheRead)
+  const cacheReadTokens = finiteNumber(usage.inputTokenDetails?.cacheReadTokens)
+  if (inputPrice === undefined || cacheReadPrice === undefined || cacheReadTokens === undefined || cacheReadTokens <= 0) return null
+  return Math.max(0, (cacheReadTokens / 1_000_000) * (inputPrice - cacheReadPrice))
+}
+
 type UsageDetailRow = {
   id: string
   label: string
@@ -920,6 +1153,13 @@ function buildUsageDetailRows(metadata: AgentMessageMetadata, modelInfoByKey: Ma
   if (metadata.finishReason) add('finishReason', '结束原因', formatFinishReason(metadata.finishReason), metadata.rawFinishReason)
 
   addTokens('inputTokens', '输入 tokens', usage?.inputTokens)
+  const cacheHitRate = finiteNumber(usage?.cacheHitRate)
+    ?? (() => {
+      const inputTokens = finiteNumber(usage?.inputTokens)
+      const cacheReadTokens = finiteNumber(usage?.inputTokenDetails?.cacheReadTokens)
+      return inputTokens && cacheReadTokens !== undefined ? cacheReadTokens / inputTokens : undefined
+    })()
+  if (cacheHitRate !== undefined) add('cacheHitRate', '缓存命中率', formatPercent(cacheHitRate))
   addTokens('noCacheTokens', '普通输入 tokens', usage?.inputTokenDetails?.noCacheTokens)
   addTokens('cacheReadTokens', '缓存读 tokens', usage?.inputTokenDetails?.cacheReadTokens)
   addTokens('cacheWriteTokens', '缓存写入 tokens', usage?.inputTokenDetails?.cacheWriteTokens)
@@ -930,6 +1170,8 @@ function buildUsageDetailRows(metadata: AgentMessageMetadata, modelInfoByKey: Ma
 
   const estimatedCost = estimateUsageCost(metadata, modelInfoByKey)
   if (estimatedCost !== null) add('estimatedCost', '估算费用', formatEstimatedCost(estimatedCost), '按本地模型价格表估算')
+  const cacheSavings = estimateCacheSavings(metadata, modelInfoByKey)
+  if (cacheSavings !== null && cacheSavings > 0) add('cacheSavings', '缓存节省', formatEstimatedCost(cacheSavings), '按普通输入价与缓存读价差估算')
 
   if (usage?.raw) {
     rows.push({
@@ -1062,6 +1304,7 @@ export default function AgentPage() {
   const [currentProviderId, setCurrentProviderId] = useState('')
   const [currentModelId, setCurrentModelId] = useState('')
   const [toolElapsedByKey, setToolElapsedByKey] = useState<Record<string, number>>({})
+  const [subAgentProgress, setSubAgentProgress] = useState<AgentProgressEvent[]>([])
   const [agentNotice, setAgentNotice] = useState('')
   const [usageDetailsModal, setUsageDetailsModal] = useState<AgentMessageMetadata | null>(null)
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null)
@@ -1158,6 +1401,12 @@ export default function AgentPage() {
       : { kind: 'global' }
 
   const handleAgentProgress = useCallback((progress: AgentProgressEvent) => {
+    if ((progress.depth ?? 0) > 0) {
+      setSubAgentProgress((prev) => mergeSubAgentProgress(prev, progress))
+    } else if (progress.stage === 'run_started') {
+      setSubAgentProgress([])
+    }
+
     if (progress.stage === 'tool_finished' && progress.toolName && progress.elapsedMs) {
       setToolElapsedByKey((prev) => ({
         ...prev,
@@ -1214,6 +1463,12 @@ export default function AgentPage() {
   const { messages, sendMessage, setMessages, status, stop } = useChat({ transport })
   const [modelOpen, setModelOpen] = useState(false)
   const busy = status === 'submitted' || status === 'streaming'
+  const lastAssistantMessageHasDelegateTool = useMemo(() => {
+    const last = messages[messages.length - 1]
+    return !!last && last.role === 'assistant' && last.parts.some((part) => (
+      isToolUIPart(part) && part.type.replace(/^tool-/, '') === 'delegate_analysis'
+    ))
+  }, [messages])
   const [conversationTitle, setConversationTitle] = useState('新对话')
   const [titleLoading, setTitleLoading] = useState(false)
   const [titleEditing, setTitleEditing] = useState(false)
@@ -1354,6 +1609,7 @@ export default function AgentPage() {
     setTitleDraft('')
     setTitleLoading(false)
     setToolElapsedByKey({})
+    setSubAgentProgress([])
     setAgentNotice('')
     activeScopeRef.current = { kind: 'global' }
     lastSavedMessagesRef.current = ''
@@ -1380,6 +1636,7 @@ export default function AgentPage() {
       activeScopeRef.current = loaded.scope || { kind: 'global' }
       setMentions([])
       setToolElapsedByKey({})
+      setSubAgentProgress([])
       setAgentNotice('')
       setTitleLoading(false)
       titleRequestSeqRef.current += 1
@@ -1400,6 +1657,7 @@ export default function AgentPage() {
         activeScopeRef.current = { kind: 'global' }
         lastSavedMessagesRef.current = ''
         setToolElapsedByKey({})
+        setSubAgentProgress([])
       }
     })
   }, [setMessages])
@@ -1504,6 +1762,7 @@ export default function AgentPage() {
   const handleSubmit = (message: PromptInputMessage) => {
     if (busy) {
       void stop()
+      setSubAgentProgress([])
       return
     }
     if (!selectedModelSupportsTools) {
@@ -1528,6 +1787,7 @@ export default function AgentPage() {
       activeScopeRef.current = submitScope
       submitScopeRef.current = submitScope
       setAgentNotice('')
+      setSubAgentProgress([])
 
       if (!conversationIdRef.current) {
         const fallback = buildFallbackConversationTitle(firstMessageForTitle || text)
@@ -1553,16 +1813,21 @@ export default function AgentPage() {
   const lastSavedMessagesRef = useRef('')
   useEffect(() => {
     if (busy || !conversationId || messages.length === 0) return
+    const messagesWithSubAgentProgress = attachSubAgentProgressToLastAssistant(messages, subAgentProgress)
+    if (messagesWithSubAgentProgress !== messages) {
+      setMessages(messagesWithSubAgentProgress)
+      return
+    }
     let signature = ''
     try {
-      signature = JSON.stringify(messages)
+      signature = JSON.stringify(messagesWithSubAgentProgress)
     } catch {
-      signature = `${messages.length}:${Date.now()}`
+      signature = `${messagesWithSubAgentProgress.length}:${Date.now()}`
     }
     if (signature === lastSavedMessagesRef.current) return
     lastSavedMessagesRef.current = signature
-    void persistConversationMessages(conversationId, messages, activeScopeRef.current)
-  }, [busy, conversationId, messages, persistConversationMessages])
+    void persistConversationMessages(conversationId, messagesWithSubAgentProgress, activeScopeRef.current)
+  }, [busy, conversationId, messages, persistConversationMessages, setMessages, subAgentProgress])
 
   // 出处：会话名解析
   const sessionNameMap = useMemo(() => new Map(sessions.map((s) => [s.username, s.displayName])), [sessions])
@@ -1714,7 +1979,10 @@ export default function AgentPage() {
         </div>
       </div>
       <Conversation className="min-h-0 flex-1">
-        <ConversationAutoScroll enabled={status === 'submitted'} trigger={messages.length} />
+        <ConversationFocusLatestUser
+          enabled={messages[messages.length - 1]?.role === 'user'}
+          trigger={messages[messages.length - 1]?.id || messages.length}
+        />
         <ConversationContent className="mx-auto w-full min-w-80 max-w-[82%] py-4">
           {messages.length === 0 ? (
             <ConversationEmptyState
@@ -1730,6 +1998,10 @@ export default function AgentPage() {
               const chainActive = isLastMessage && busy
               const assistantText = message.role === 'assistant' ? messageTextOf(message) : ''
               const userDisplay = message.role === 'user' ? getUserMessageDisplay(message.parts) : null
+              const persistedSubAgentEvents = message.role === 'assistant' ? readSubAgentProgressFromMessage(message) : []
+              const subAgentEventsForMessage = message.role === 'assistant'
+                ? (isLastMessage && subAgentProgress.length > 0 ? subAgentProgress : persistedSubAgentEvents)
+                : []
               return (
                 <Message from={message.role} key={message.id}>
                   {userDisplay && <UserMessageMentions mentions={userDisplay.mentions} />}
@@ -1758,6 +2030,7 @@ export default function AgentPage() {
                           const elapsedMs = toolElapsedByKey[toolPartProgressKey(part, toolName)]
                           const label = done && elapsedMs ? `${toolLabel} · ${formatElapsed(elapsedMs)}` : toolLabel
                           const badges = collectToolBadges(part.input)
+                          const delegateTask = toolName === 'delegate_analysis' ? getDelegateTask(part) : undefined
                           if (part.state === 'output-available') {
                             for (const badge of collectRetrievalBadges(toolName, part.output)) pushBadge(badges, badge)
                             collectToolBadges(part.output, badges)
@@ -1780,6 +2053,9 @@ export default function AgentPage() {
                               )}
                               {part.state === 'output-error' && part.errorText && (
                                 <p className="text-destructive text-xs">{part.errorText}</p>
+                              )}
+                              {toolName === 'delegate_analysis' && subAgentEventsForMessage.length > 0 && (
+                                <SubAgentProgressPanel events={subAgentEventsForMessage} task={delegateTask} />
                               )}
                             </ChainOfThoughtStep>
                           )
@@ -1825,6 +2101,7 @@ export default function AgentPage() {
               {agentNotice}
             </div>
           )}
+          {busy && subAgentProgress.length > 0 && !lastAssistantMessageHasDelegateTool && <SubAgentProgressPanel events={subAgentProgress} />}
           {status === 'submitted' && <Loader />}
         </ConversationContent>
         <ConversationScrollButton />
@@ -1839,6 +2116,7 @@ export default function AgentPage() {
             maxFileSize={8 * 1024 * 1024}
             multiple
             onSubmit={handleSubmit}
+            style={{ '--agent-radius': '14px' } as CSSProperties}
           >
             <PromptInputHeader className="flex-col items-stretch gap-2 border-b">
               <MentionField

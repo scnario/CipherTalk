@@ -11,12 +11,21 @@ import { z } from 'zod'
 import { createLanguageModel } from '../provider'
 import { buildSystemPrompt } from '../prompts'
 import { loopGuardCondition } from '../guards'
-import { withSubAgentScope } from '../progress'
+import { compactMessages } from '../compaction'
+import { reportAgentProgress, withSubAgentScope } from '../progress'
+import { buildToolRuntimeContext } from '../toolPolicy'
 import type { AgentEvidenceItem } from './shared'
 import type { AgentProviderConfig, AgentScope } from '../types'
 
 const SUB_AGENT_MAX_STEPS = 12
 const MAX_DELEGATED_EVIDENCE = 15
+const DEFAULT_SUB_AGENT_TEMPERATURE = 0.2
+const MAX_PROGRESS_DETAIL_LENGTH = 180
+
+function summarizeProgressDetail(value: string): string {
+  const text = value.replace(/\s+/g, ' ').trim()
+  return text.length > MAX_PROGRESS_DETAIL_LENGTH ? `${text.slice(0, MAX_PROGRESS_DETAIL_LENGTH)}...` : text
+}
 
 /** 从子 Agent 的各步工具结果里聚合 evidence（去重、限量），供主 Agent 标注可点出处。 */
 function collectEvidence(steps: ReadonlyArray<{ toolResults?: ReadonlyArray<{ output?: unknown }> }>): AgentEvidenceItem[] {
@@ -42,7 +51,7 @@ const DELEGATE_SUFFIX =
   '\n\n你现在是被主助手委托的【子助手】：只专注完成下面这一个子任务，' +
   '用工具查到的真实数据得出结论，简洁作答并在结论里标注关键出处（时间 + 发送者）。' +
   '不要寒暄、不要复述任务，直接给结论。' +
-  '你自己没有 delegate_analysis 工具，请直接用其它工具完成，不要尝试再委托。'
+  '你自己没有 delegate_analysis、update_plan、记忆工具或 MCP 工具，请直接用读/查/统计工具完成，不要尝试再委托或规划。'
 
 export function createDelegateAnalysis(opts: {
   providerConfig: AgentProviderConfig
@@ -60,23 +69,50 @@ export function createDelegateAnalysis(opts: {
       task: z.string().describe('委托的子任务：分析什么、范围（会话 username / 时间段）、期望结论形式'),
     }),
     execute: async ({ task }, { abortSignal }) => {
-      try {
-        const subAgent = new ToolLoopAgent({
-          model: createLanguageModel(opts.providerConfig),
-          instructions: buildSystemPrompt(opts.scope) + DELEGATE_SUFFIX,
-          tools: opts.buildSubTools(),
-          stopWhen: [stepCountIs(SUB_AGENT_MAX_STEPS), loopGuardCondition()],
+      return withSubAgentScope(async () => {
+        const startedAt = Date.now()
+        reportAgentProgress({
+          stage: 'run_started',
+          title: '子助手开始分析',
+          detail: summarizeProgressDetail(task),
         })
-        const result = await withSubAgentScope(() => subAgent.generate({ prompt: task, abortSignal }))
-        const conclusion = result.text.trim()
-        return {
-          conclusion: conclusion || '（子助手未得出结论，可能任务过大或数据不足，建议缩小范围重试）',
-          steps: result.steps.length,
-          evidence: collectEvidence(result.steps),
+        try {
+          const tools = opts.buildSubTools()
+          const subAgent = new ToolLoopAgent({
+            model: createLanguageModel(opts.providerConfig),
+            instructions: buildSystemPrompt(opts.scope) + DELEGATE_SUFFIX,
+            tools,
+            temperature: DEFAULT_SUB_AGENT_TEMPERATURE,
+            stopWhen: [stepCountIs(SUB_AGENT_MAX_STEPS), loopGuardCondition()],
+            prepareStep: ({ messages, steps }) => ({
+              messages: compactMessages(messages),
+              experimental_context: buildToolRuntimeContext(steps),
+            }),
+          })
+          const result = await subAgent.generate({ prompt: task, abortSignal })
+          const conclusion = result.text.trim()
+          reportAgentProgress({
+            stage: 'run_finished',
+            title: '子助手分析完成',
+            detail: conclusion ? summarizeProgressDetail(conclusion) : '未得出明确结论',
+            elapsedMs: Date.now() - startedAt,
+          })
+          return {
+            conclusion: conclusion || '（子助手未得出结论，可能任务过大或数据不足，建议缩小范围重试）',
+            steps: result.steps.length,
+            evidence: collectEvidence(result.steps),
+          }
+        } catch (e) {
+          const message = e instanceof Error ? e.message : String(e)
+          reportAgentProgress({
+            stage: 'error',
+            title: '子助手分析失败',
+            detail: message,
+            elapsedMs: Date.now() - startedAt,
+          })
+          return { error: message }
         }
-      } catch (e) {
-        return { error: e instanceof Error ? e.message : String(e) }
-      }
+      })
     },
   })
 }
