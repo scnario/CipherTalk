@@ -5,24 +5,23 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type UIEvent } from 'react'
 import { useChat } from '@ai-sdk/react'
 import { isToolUIPart, type ChatStatus, type UIMessage } from 'ai'
-import { Button as HeroButton, Modal, Surface, Table } from '@heroui/react'
-import { AtSign, BarChart3, Braces, Brain, CheckIcon, Clock3, Copy, FileText, History, Image as ImageIcon, Info, PenLine, Quote, Search, SquarePen, Trash2, Users, Volume2, Wrench, X, Sparkles } from 'lucide-react'
+import { Button as HeroButton, ButtonGroup, Dropdown, Label, Modal, Separator, Surface, Switch, Table } from '@heroui/react'
+import { AtSign, BarChart3, Braces, Brain, CheckIcon, ChevronDown, Clock3, Code2, Copy, FileText, Globe, History, Image as ImageIcon, Info, Link2, ListChecks, PenLine, Play, Quote, RefreshCcw, Search, Slash, SquarePen, Table2, Trash2, Users, Volume2, Wrench, X, Sparkles } from 'lucide-react'
 import { Sources, SourcesContent, SourcesTrigger } from '@/components/ai-elements/sources'
 import { HoverCard, HoverCardContent, HoverCardTrigger } from '@/components/ui/hover-card'
 import {
   Conversation,
+  ConversationAutoScroll,
   ConversationContent,
   ConversationEmptyState,
-  ConversationFocusLatestUser,
   ConversationScrollButton,
 } from '@/components/ai-elements/conversation'
-import { Message, MessageAction, MessageActions, MessageAttachment, MessageAttachments, MessageContent, MessageResponse } from '@/components/ai-elements/message'
+import { analyzeMessageRenderActivity, Message, MessageAction, MessageActions, MessageAttachment, MessageAttachments, MessageContent, MessageResponse, type MessageRenderActivity } from '@/components/ai-elements/message'
 import {
   PromptInput,
   PromptInputActionAddAttachments,
   PromptInputActionMenu,
   PromptInputActionMenuContent,
-  PromptInputActionMenuItem,
   PromptInputActionMenuTrigger,
   PromptInputAttachment,
   PromptInputAttachments,
@@ -31,11 +30,6 @@ import {
   PromptInputHeader,
   PromptInputProvider,
   PromptInputSpeechButton,
-  PromptInputSelect,
-  PromptInputSelectContent,
-  PromptInputSelectItem,
-  PromptInputSelectTrigger,
-  PromptInputSelectValue,
   PromptInputSubmit,
   PromptInputTextarea,
   PromptInputTools,
@@ -83,13 +77,66 @@ const REASONING_EFFORT_OPTIONS: Array<{ value: AgentReasoningEffort; label: stri
   { value: 'high', label: '思考：高' },
 ]
 
-function PromptPresetMenuItem({ label, text, icon: Icon }: (typeof PROMPT_PRESETS)[number]) {
+const PLAN_DELEGATE_ANALYSIS_REQUIRED_PATTERN = /<!--\s*ciphertalk:delegate_analysis=required\s*-->/i
+const PLAN_CONTROL_MARKER_PATTERN = /<!--\s*ciphertalk:delegate_analysis=(?:required|not_required)\s*-->/gi
+
+function stripPlanControlMarkers(text: string): string {
+  return text.replace(PLAN_CONTROL_MARKER_PATTERN, '').trim()
+}
+
+function planRequiresDelegateAnalysis(text: string): boolean {
+  return PLAN_DELEGATE_ANALYSIS_REQUIRED_PATTERN.test(text)
+}
+
+function SlashPresetButton({ showGroupSeparator = false }: { showGroupSeparator?: boolean }) {
   const { textInput } = usePromptInputController()
+  const value = textInput.value
+  const slashMatch = value.match(/(?:^|\s)\/([^\s/]{0,20})$/)
+  const query = slashMatch ? slashMatch[1].toLowerCase() : null
+  const presets = useMemo(
+    () => PROMPT_PRESETS.filter((preset) => !query || preset.label.toLowerCase().includes(query) || preset.text.toLowerCase().includes(query)),
+    [query]
+  )
+  const [manualOpen, setManualOpen] = useState(false)
+  const isOpen = manualOpen || query !== null
+
+  const openSlashMenu = () => {
+    const v = textInput.value
+    textInput.setInput(v && !v.endsWith(' ') && !v.endsWith('/') ? `${v} /` : `${v}/`)
+    setManualOpen(true)
+  }
+
+  const applyPreset = (text: string) => {
+    if (query !== null) {
+      const slashIdx = value.lastIndexOf('/')
+      const prefix = slashIdx >= 0 ? value.slice(0, slashIdx).trimEnd() : ''
+      textInput.setInput(prefix ? `${prefix} ${text}` : text)
+    } else {
+      textInput.setInput(text)
+    }
+    setManualOpen(false)
+  }
+
   return (
-    <PromptInputActionMenuItem onSelect={() => textInput.setInput(text)}>
-      <Icon className="size-4" />
-      {label}
-    </PromptInputActionMenuItem>
+    <Dropdown isOpen={isOpen} onOpenChange={setManualOpen}>
+      <HeroButton aria-label="打开预设" isIconOnly size="sm" variant="tertiary" onPress={openSlashMenu}>
+        {showGroupSeparator && <ButtonGroup.Separator />}
+        <Slash className="size-3.5" />
+      </HeroButton>
+      <Dropdown.Popover className="min-w-56" placement="top start">
+        <Dropdown.Menu>
+          {presets.map((preset) => {
+            const Icon = preset.icon
+            return (
+              <Dropdown.Item id={`preset-${preset.label}`} key={preset.label} textValue={preset.label} onAction={() => applyPreset(preset.text)}>
+                <Icon className="size-4 shrink-0 text-muted" />
+                <Label>{preset.label}</Label>
+              </Dropdown.Item>
+            )
+          })}
+        </Dropdown.Menu>
+      </Dropdown.Popover>
+    </Dropdown>
   )
 }
 
@@ -151,6 +198,33 @@ const ModelItem = memo(
 )
 ModelItem.displayName = 'ModelItem'
 
+// 计划模式专用：把"执行计划"正文装进单独的可折叠卡片，默认收起，点击标题展开看详情。
+function PlanCard({ text, streaming }: { text: string; streaming: boolean }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="my-1.5 overflow-hidden rounded-xl border border-border bg-surface">
+      <button
+        aria-expanded={open}
+        className="flex w-full items-center gap-2 px-3 py-2 text-left font-medium text-sm hover:bg-muted/40"
+        onClick={() => setOpen((value) => !value)}
+        type="button"
+      >
+        <ListChecks className="size-4 shrink-0 text-muted-foreground" />
+        <span>执行计划</span>
+        {streaming
+          ? <span className="font-normal text-muted-foreground text-xs">生成中…</span>
+          : <span className="font-normal text-muted-foreground text-xs">{open ? '点击收起' : '点击展开查看详情'}</span>}
+        <ChevronDown className={`ml-auto size-4 shrink-0 text-muted-foreground transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && (
+        <div className="border-border border-t px-3 py-2">
+          <MessageResponse isStreaming={streaming}>{text}</MessageResponse>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function MessageChainOfThought({ active, children }: { active: boolean; children: ReactNode }) {
   const [open, setOpen] = useState(active)
   const prevActive = useRef(active)
@@ -177,6 +251,7 @@ const TOOL_LABELS: Record<string, string> = {
   consolidate_memory: '整理记忆',
   search_moments: '搜索朋友圈',
   moments_stats: '朋友圈统计',
+  web_search: '联网搜索',
   auto_memory: '自动记忆',
   final_review: '最终审核',
 }
@@ -240,6 +315,47 @@ function renderChainLabel(label: string, active: boolean) {
   )
 }
 
+function renderOutputActivitySteps(activity: MessageRenderActivity, isStreaming: boolean) {
+  const steps: Array<{ key: string; icon: typeof BarChart3; label: string; doneLabel: string; active: boolean }> = []
+  if (activity.hasChart || activity.pendingChart) {
+    steps.push({
+      key: 'chart',
+      icon: BarChart3,
+      label: '正在生成图表',
+      doneLabel: '已生成图表',
+      active: isStreaming,
+    })
+  }
+  if (activity.hasTable || activity.pendingTable) {
+    steps.push({
+      key: 'table',
+      icon: Table2,
+      label: '正在整理表格',
+      doneLabel: '已整理表格',
+      active: isStreaming,
+    })
+  }
+  if (activity.hasCode || activity.pendingCode) {
+    steps.push({
+      key: 'code',
+      icon: Code2,
+      label: '正在生成代码块',
+      doneLabel: '已生成代码块',
+      active: isStreaming,
+    })
+  }
+  if (activity.hasLink || activity.pendingLink) {
+    steps.push({
+      key: 'link',
+      icon: Link2,
+      label: '正在处理链接',
+      doneLabel: activity.linkCount > 0 ? `已处理链接 ${activity.linkCount} 条` : '已处理链接',
+      active: isStreaming && (activity.pendingLink || activity.hasLink),
+    })
+  }
+  return steps
+}
+
 function formatElapsed(ms: number) {
   return `${Math.round(ms / 100) / 10}s`
 }
@@ -263,6 +379,7 @@ function getDelegateTask(part: unknown): string | undefined {
 }
 
 const SUB_AGENT_PROGRESS_LIMIT = 12
+const AGENT_PENDING_TITLE = '正在准备请求'
 
 function subAgentProgressKey(progress: AgentProgressEvent) {
   if (progress.toolCallId) return `call:${progress.toolCallId}`
@@ -322,6 +439,41 @@ function subAgentProgressIcon(progress: AgentProgressEvent) {
   return Wrench
 }
 
+function agentProgressIcon(progress: AgentProgressEvent) {
+  const title = progress.title || ''
+  if (progress.stage === 'error') return Info
+  if (title.includes('记忆')) return Brain
+  if (title.includes('工具')) return Wrench
+  if (title.includes('模型')) return Sparkles
+  return Sparkles
+}
+
+function AgentProgressChain({ active, events }: { active: boolean; events: AgentProgressEvent[] }) {
+  if (events.length === 0) return null
+  const latestKey = subAgentProgressKey(events[events.length - 1])
+
+  return (
+    <MessageChainOfThought active={active}>
+      {events.map((progress) => {
+        const key = subAgentProgressKey(progress)
+        const stepActive = active
+          && key === latestKey
+          && progress.stage !== 'run_finished'
+          && progress.stage !== 'error'
+        return (
+          <ChainOfThoughtStep
+            description={progress.detail}
+            icon={agentProgressIcon(progress)}
+            key={key}
+            label={renderChainLabel(formatSubAgentProgressTitle(progress), stepActive)}
+            status={stepActive ? 'active' : progress.stage === 'error' ? 'pending' : 'complete'}
+          />
+        )
+      })}
+    </MessageChainOfThought>
+  )
+}
+
 function subAgentProgressDotClass(progress: AgentProgressEvent) {
   if (progress.stage === 'error') return 'bg-destructive'
   if (progress.stage === 'tool_finished' || progress.stage === 'run_finished') return 'bg-emerald-500'
@@ -334,6 +486,10 @@ function formatProgressTime(value: number) {
 
 function subAgentPanelTitle(latest: AgentProgressEvent) {
   if (latest.stage === 'error') return '子助手出错'
+  if ((latest.depth ?? 0) === 0) {
+    if (latest.stage === 'run_finished') return 'AI 助手已完成'
+    return 'AI 助手准备中'
+  }
   if (latest.stage === 'run_finished') return '子助手已完成'
   return '子助手运行中'
 }
@@ -359,7 +515,7 @@ function SubAgentProgressPanel({ events, task }: { events: AgentProgressEvent[];
       {task && (
         <div className="mb-2 rounded-(--agent-radius,12px) bg-muted/50 px-2 py-1.5 text-muted-foreground">
           <div className="mb-0.5 text-[11px] text-foreground">委托任务</div>
-          <div className="line-clamp-3 whitespace-pre-wrap break-words">{task}</div>
+          <div className="line-clamp-3 whitespace-pre-wrap wrap-break-word">{task}</div>
         </div>
       )}
       <div className="mb-2 flex flex-wrap gap-1">
@@ -791,21 +947,22 @@ function MentionField({
 }
 
 /** 工具栏里的 @ 按钮：往输入框塞一个 @ 触发选择列表（提升可发现性）。 */
-function MentionTriggerButton() {
+function MentionTriggerButton({ showGroupSeparator = false }: { showGroupSeparator?: boolean }) {
   const { textInput } = usePromptInputController()
   return (
-    <Button
+    <HeroButton
       aria-label="提及联系人或群"
-      className="size-8 rounded-(--agent-radius,12px) border-border/60 bg-transparent p-0 hover:bg-accent/50"
-      onClick={() => {
+      isIconOnly
+      onPress={() => {
         const v = textInput.value
         textInput.setInput(v && !v.endsWith(' ') && !v.endsWith('@') ? `${v} @` : `${v}@`)
       }}
-      type="button"
-      variant="outline"
+      size="sm"
+      variant="tertiary"
     >
+      {showGroupSeparator && <ButtonGroup.Separator />}
       <AtSign className="size-3.5" />
-    </Button>
+    </HeroButton>
   )
 }
 
@@ -981,8 +1138,11 @@ type AgentMessageMetadata = {
   rawFinishReason?: string
   modelProvider?: string
   modelId?: string
+  /** 计划模式生成的消息：正文是"执行计划"，前端用可折叠卡片展示（默认收起）。 */
+  planMode?: boolean
   ciphertalk?: {
     subAgentProgress?: AgentProgressEvent[]
+    toolElapsed?: Record<string, number>
   }
 }
 
@@ -1034,6 +1194,52 @@ function attachSubAgentProgressToLastAssistant(messages: UIMessage[], progress: 
       },
     } as UIMessage
   })
+}
+
+function readToolElapsedFromMessage(message: UIMessage): Record<string, number> {
+  const value = (message as { metadata?: AgentMessageMetadata }).metadata?.ciphertalk?.toolElapsed
+  if (!value || typeof value !== 'object') return {}
+  const out: Record<string, number> = {}
+  for (const [key, ms] of Object.entries(value)) {
+    if (typeof ms === 'number' && Number.isFinite(ms)) out[key] = ms
+  }
+  return out
+}
+
+function sameToolElapsed(a: Record<string, number>, b: Record<string, number>): boolean {
+  const aKeys = Object.keys(a)
+  if (aKeys.length !== Object.keys(b).length) return false
+  return aKeys.every((key) => a[key] === b[key])
+}
+
+/** 把工具步骤耗时写进各助手消息 metadata，重开会话后思考链里的工具步骤仍显示 "· X.Xs"。 */
+function attachToolElapsedToMessages(messages: UIMessage[], toolElapsedByKey: Record<string, number>): UIMessage[] {
+  let changed = false
+  const next = messages.map((message) => {
+    if (message.role !== 'assistant') return message
+    const elapsed: Record<string, number> = {}
+    for (const part of message.parts) {
+      if (!isToolUIPart(part)) continue
+      const toolName = part.type.replace(/^tool-/, '')
+      const ms = toolElapsedByKey[toolPartProgressKey(part, toolName)]
+      if (typeof ms === 'number' && Number.isFinite(ms)) elapsed[toolPartProgressKey(part, toolName)] = ms
+    }
+    if (Object.keys(elapsed).length === 0) return message
+    if (sameToolElapsed(readToolElapsedFromMessage(message), elapsed)) return message
+    changed = true
+    const metadata = ((message as { metadata?: AgentMessageMetadata }).metadata || {}) as AgentMessageMetadata
+    return {
+      ...message,
+      metadata: {
+        ...metadata,
+        ciphertalk: {
+          ...(metadata.ciphertalk || {}),
+          toolElapsed: elapsed,
+        },
+      },
+    } as UIMessage
+  })
+  return changed ? next : messages
 }
 
 function finiteNumber(value: unknown): number | undefined {
@@ -1197,20 +1403,26 @@ function messageTextOf(message: UIMessage): string {
 }
 
 function MessageUsageStats({
+  canRegenerate,
   metadata,
   messageText,
   copied,
+  regenerating,
   speaking,
   onCopy,
   onOpenDetails,
+  onRegenerate,
   onSpeak,
 }: {
+  canRegenerate: boolean
   metadata: unknown
   messageText: string
   copied: boolean
+  regenerating: boolean
   speaking: boolean
   onCopy: () => void
   onOpenDetails: (data: AgentMessageMetadata) => void
+  onRegenerate: () => void
   onSpeak: () => void
 }) {
   const parsed = parseAgentMessageMetadata(metadata)
@@ -1237,9 +1449,18 @@ function MessageUsageStats({
             <Volume2 className={`size-3.5 ${speaking ? 'text-accent-foreground' : ''}`} />
           </MessageAction>
           <MessageAction
+            disabled={!canRegenerate || regenerating}
+            label="重新生成"
+            onClick={onRegenerate}
+            tooltip="重新生成"
+          >
+            <RefreshCcw className={`size-3.5 ${regenerating ? 'animate-spin' : ''}`} />
+          </MessageAction>
+          <MessageAction
             disabled={!parsed}
             label="详情"
             onClick={() => parsed && onOpenDetails(parsed)}
+            startsGroup
             tooltip="详情"
           >
             <Info className="size-3.5" />
@@ -1301,9 +1522,44 @@ export default function AgentPage() {
   const [providersInfo, setProvidersInfo] = useState<AIProviderInfo[]>([])
   const [selectedPresetId, setSelectedPresetId] = useState('current')
   const [reasoningEffort, setReasoningEffort] = useState<AgentReasoningEffort>('auto')
+  // 计划模式：开启后本轮只出执行计划、不下结论，等用户点"开始执行"再跑（参考 ClaudeCode/Codex）
+  const [planMode, setPlanMode] = useState(false)
+  const planModeRef = useRef(planMode)
+  planModeRef.current = planMode
+  // 标记当前在途的这次运行是否为计划模式（finish 前 metadata 还没回来，流式期间靠它判定计划卡片）
+  const runIsPlanRef = useRef(false)
+  // 联网搜索（Tavily）：全局开关，存在 config，模型自己决定何时联网；+ 菜单里快捷开关
+  const [webSearchOn, setWebSearchOn] = useState(false)
+  const [webSearchHasKey, setWebSearchHasKey] = useState(false)
+  useEffect(() => {
+    void window.electronAPI.webSearch?.getConfig().then((res) => {
+      if (res.success && res.config) {
+        const cfg = res.config as { enabled?: boolean; apiKey?: string }
+        setWebSearchOn(Boolean(cfg.enabled))
+        setWebSearchHasKey(Boolean(cfg.apiKey))
+      }
+    })
+  }, [])
+  const toggleWebSearch = useCallback(async () => {
+    const next = !webSearchOn
+    if (next) {
+      // 重新读一遍配置，避免本次会话内刚在设置里填了 key 但缓存还是“无 key”
+      const res = await window.electronAPI.webSearch?.getConfig()
+      const hasKey = res?.success ? Boolean((res.config as { apiKey?: string } | undefined)?.apiKey) : webSearchHasKey
+      setWebSearchHasKey(hasKey)
+      if (!hasKey) {
+        setAgentNotice('请先在 设置 → AI 接入 → 联网 里填写 Tavily API Key，再开启联网搜索。')
+        return
+      }
+    }
+    setWebSearchOn(next)
+    void window.electronAPI.webSearch?.setConfig({ enabled: next })
+  }, [webSearchOn, webSearchHasKey])
   const [currentProviderId, setCurrentProviderId] = useState('')
   const [currentModelId, setCurrentModelId] = useState('')
   const [toolElapsedByKey, setToolElapsedByKey] = useState<Record<string, number>>({})
+  const [agentProgress, setAgentProgress] = useState<AgentProgressEvent[]>([])
+  const [agentRunPending, setAgentRunPending] = useState(false)
   const [subAgentProgress, setSubAgentProgress] = useState<AgentProgressEvent[]>([])
   const [agentNotice, setAgentNotice] = useState('')
   const [usageDetailsModal, setUsageDetailsModal] = useState<AgentMessageMetadata | null>(null)
@@ -1403,8 +1659,16 @@ export default function AgentPage() {
   const handleAgentProgress = useCallback((progress: AgentProgressEvent) => {
     if ((progress.depth ?? 0) > 0) {
       setSubAgentProgress((prev) => mergeSubAgentProgress(prev, progress))
-    } else if (progress.stage === 'run_started') {
-      setSubAgentProgress([])
+    } else {
+      setAgentProgress((prev) => {
+        const withoutLocalPending = prev.filter((item) => item.title !== AGENT_PENDING_TITLE)
+        return mergeSubAgentProgress(withoutLocalPending, progress)
+      })
+      if (progress.stage === 'run_started') {
+        setSubAgentProgress([])
+      } else if (progress.stage === 'run_finished' || progress.stage === 'error') {
+        setAgentRunPending(false)
+      }
     }
 
     if (progress.stage === 'tool_finished' && progress.toolName && progress.elapsedMs) {
@@ -1457,18 +1721,44 @@ export default function AgentPage() {
       () => selectedModelConfigRef.current,
       () => conversationIdRef.current,
       handleAgentProgress,
+      () => planModeRef.current,
     ),
     [handleAgentProgress]
   )
   const { messages, sendMessage, setMessages, status, stop } = useChat({ transport })
   const [modelOpen, setModelOpen] = useState(false)
   const busy = status === 'submitted' || status === 'streaming'
+  const latestUserMessageId = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      if (messages[i].role === 'user') return messages[i].id
+    }
+    return ''
+  }, [messages])
+  const shouldAnchorLatestUser = busy && !!latestUserMessageId
   const lastAssistantMessageHasDelegateTool = useMemo(() => {
     const last = messages[messages.length - 1]
     return !!last && last.role === 'assistant' && last.parts.some((part) => (
       isToolUIPart(part) && part.type.replace(/^tool-/, '') === 'delegate_analysis'
     ))
   }, [messages])
+  // 本次会话累计 token 用量（各助手消息 usage 求和），供输入框底部展示
+  const conversationUsage = useMemo(() => {
+    let input = 0
+    let output = 0
+    let hasAny = false
+    for (const message of messages) {
+      if (message.role !== 'assistant') continue
+      const usage = parseAgentMessageMetadata(message.metadata)?.usage
+      if (!usage) continue
+      hasAny = true
+      input += finiteNumber(usage.inputTokens) ?? 0
+      output += finiteNumber(usage.outputTokens) ?? 0
+    }
+    return { input, output, total: input + output, hasAny }
+  }, [messages])
+  const showAgentProgressChain = agentProgress.length > 0
+    && status !== 'streaming'
+    && (status === 'submitted' || agentRunPending)
   const [conversationTitle, setConversationTitle] = useState('新对话')
   const [titleLoading, setTitleLoading] = useState(false)
   const [titleEditing, setTitleEditing] = useState(false)
@@ -1609,6 +1899,8 @@ export default function AgentPage() {
     setTitleDraft('')
     setTitleLoading(false)
     setToolElapsedByKey({})
+    setAgentProgress([])
+    setAgentRunPending(false)
     setSubAgentProgress([])
     setAgentNotice('')
     activeScopeRef.current = { kind: 'global' }
@@ -1635,7 +1927,11 @@ export default function AgentPage() {
       setTitleDraft('')
       activeScopeRef.current = loaded.scope || { kind: 'global' }
       setMentions([])
-      setToolElapsedByKey({})
+      const restoredToolElapsed: Record<string, number> = {}
+      for (const message of loaded.messages) Object.assign(restoredToolElapsed, readToolElapsedFromMessage(message))
+      setToolElapsedByKey(restoredToolElapsed)
+      setAgentProgress([])
+      setAgentRunPending(false)
       setSubAgentProgress([])
       setAgentNotice('')
       setTitleLoading(false)
@@ -1657,6 +1953,8 @@ export default function AgentPage() {
         activeScopeRef.current = { kind: 'global' }
         lastSavedMessagesRef.current = ''
         setToolElapsedByKey({})
+        setAgentProgress([])
+        setAgentRunPending(false)
         setSubAgentProgress([])
       }
     })
@@ -1759,7 +2057,7 @@ export default function AgentPage() {
     }
   }, [refreshConversationRecords])
 
-  const handleSubmit = (message: PromptInputMessage) => {
+  const handleSubmit = async (message: PromptInputMessage) => {
     if (busy) {
       void stop()
       setSubAgentProgress([])
@@ -1769,26 +2067,29 @@ export default function AgentPage() {
       setAgentNotice('当前模型不支持工具调用，无法查询本地聊天记录。请切换到带“工具调用”能力的模型。')
       return
     }
-    void (async () => {
-      const isFirstUserMessage = messages.length === 0
-      const firstMessageForTitle = message.text.trim()
-      let text = message.text.trim()
-      const currentMentions = mentions
-      if (currentMentions.length > 0) {
-        const mentionLine = currentMentions.map((m) => `@${m.displayName}[${m.username}]`).join(' ')
-        text = text ? `${mentionLine}\n${text}` : mentionLine
-      }
-      if (!text && message.files.length === 0) return
+    const isFirstUserMessage = messages.length === 0
+    const firstMessageForTitle = message.text.trim()
+    let text = message.text.trim()
+    const currentMentions = mentions
+    if (currentMentions.length > 0) {
+      const mentionLine = currentMentions.map((m) => `@${m.displayName}[${m.username}]`).join(' ')
+      text = text ? `${mentionLine}\n${text}` : mentionLine
+    }
+    if (!text && message.files.length === 0) return
 
-      const submitScope: AgentScope =
-        currentMentions.length === 1
-          ? { kind: 'session', sessionId: currentMentions[0].username, displayName: currentMentions[0].displayName }
-          : { kind: 'global' }
-      activeScopeRef.current = submitScope
-      submitScopeRef.current = submitScope
-      setAgentNotice('')
-      setSubAgentProgress([])
+    const submitScope: AgentScope =
+      currentMentions.length === 1
+        ? { kind: 'session', sessionId: currentMentions[0].username, displayName: currentMentions[0].displayName }
+        : { kind: 'global' }
+    activeScopeRef.current = submitScope
+    submitScopeRef.current = submitScope
+    runIsPlanRef.current = planModeRef.current
+    setAgentNotice('')
+    setAgentProgress([{ stage: 'run_started', title: AGENT_PENDING_TITLE, detail: '正在创建会话并准备上下文', at: Date.now() }])
+    setAgentRunPending(true)
+    setSubAgentProgress([])
 
+    try {
       if (!conversationIdRef.current) {
         const fallback = buildFallbackConversationTitle(firstMessageForTitle || text)
         setConversationTitle(fallback)
@@ -1797,12 +2098,70 @@ export default function AgentPage() {
 
       if (isFirstUserMessage) generateTitleFromFirstMessage(firstMessageForTitle || text)
 
-      await Promise.resolve(sendMessage({ text, files: message.files })).finally(() => {
+      const sendPromise = Promise.resolve(sendMessage({ text, files: message.files })).finally(() => {
         submitScopeRef.current = null
+        setAgentRunPending(false)
       })
+      void sendPromise
       setMentions([])
-    })()
+    } catch (error) {
+      submitScopeRef.current = null
+      setAgentRunPending(false)
+      throw error
+    }
   }
+
+  const handleRegenerateAssistantMessage = useCallback((messageIndex: number) => {
+    if (busy || !selectedModelSupportsTools) return
+    const userIndex = (() => {
+      for (let index = messageIndex - 1; index >= 0; index -= 1) {
+        if (messages[index]?.role === 'user') return index
+      }
+      return -1
+    })()
+    if (userIndex < 0) return
+
+    const userMessage = messages[userIndex]
+    const text = messageTextOf(userMessage)
+    const files = userMessage.parts.filter((part): part is Extract<UIMessage['parts'][number], { type: 'file' }> => part.type === 'file')
+    if (!text && files.length === 0) return
+
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      window.speechSynthesis.cancel()
+      setSpeakingMessageId(null)
+    }
+    setAgentNotice('')
+    setAgentProgress([{ stage: 'run_started', title: AGENT_PENDING_TITLE, detail: '正在重新生成回答', at: Date.now() }])
+    setAgentRunPending(true)
+    setSubAgentProgress([])
+    runIsPlanRef.current = planModeRef.current
+    submitScopeRef.current = activeScopeRef.current
+    setMessages(messages.slice(0, userIndex))
+
+    const sendPromise = Promise.resolve(sendMessage({ text, files })).finally(() => {
+      submitScopeRef.current = null
+      setAgentRunPending(false)
+    })
+    void sendPromise
+  }, [busy, messages, selectedModelSupportsTools, sendMessage, setMessages])
+
+  // 计划模式确认：关闭计划模式并让 Agent 按上一条计划开始执行（沿用当前会话 scope）
+  const handleExecutePlan = useCallback(() => {
+    if (busy || !selectedModelSupportsTools) return
+    planModeRef.current = false
+    runIsPlanRef.current = false
+    setPlanMode(false)
+    setAgentNotice('')
+    setAgentProgress([{ stage: 'run_started', title: AGENT_PENDING_TITLE, detail: '正在按计划执行', at: Date.now() }])
+    setAgentRunPending(true)
+    setSubAgentProgress([])
+    submitScopeRef.current = activeScopeRef.current
+    const sendPromise = Promise.resolve(sendMessage({ text: '请按上面的计划开始执行，按需调用工具或委托子助手，直接给出最终结果，不要再重复计划。', files: [] })).finally(() => {
+      submitScopeRef.current = null
+      setAgentRunPending(false)
+    })
+    void sendPromise
+  }, [busy, selectedModelSupportsTools, sendMessage])
 
   const handleModelSelect = useCallback((id: string) => {
     if (models.find((model) => model.id === id)?.disabled) return
@@ -1818,16 +2177,21 @@ export default function AgentPage() {
       setMessages(messagesWithSubAgentProgress)
       return
     }
+    const messagesWithToolElapsed = attachToolElapsedToMessages(messagesWithSubAgentProgress, toolElapsedByKey)
+    if (messagesWithToolElapsed !== messagesWithSubAgentProgress) {
+      setMessages(messagesWithToolElapsed)
+      return
+    }
     let signature = ''
     try {
-      signature = JSON.stringify(messagesWithSubAgentProgress)
+      signature = JSON.stringify(messagesWithToolElapsed)
     } catch {
-      signature = `${messagesWithSubAgentProgress.length}:${Date.now()}`
+      signature = `${messagesWithToolElapsed.length}:${Date.now()}`
     }
     if (signature === lastSavedMessagesRef.current) return
     lastSavedMessagesRef.current = signature
-    void persistConversationMessages(conversationId, messagesWithSubAgentProgress, activeScopeRef.current)
-  }, [busy, conversationId, messages, persistConversationMessages, setMessages, subAgentProgress])
+    void persistConversationMessages(conversationId, messagesWithToolElapsed, activeScopeRef.current)
+  }, [busy, conversationId, messages, persistConversationMessages, setMessages, subAgentProgress, toolElapsedByKey])
 
   // 出处：会话名解析
   const sessionNameMap = useMemo(() => new Map(sessions.map((s) => [s.username, s.displayName])), [sessions])
@@ -1979,11 +2343,8 @@ export default function AgentPage() {
         </div>
       </div>
       <Conversation className="min-h-0 flex-1">
-        <ConversationFocusLatestUser
-          enabled={messages[messages.length - 1]?.role === 'user'}
-          trigger={messages[messages.length - 1]?.id || messages.length}
-        />
-        <ConversationContent className="mx-auto w-full min-w-80 max-w-[82%] py-4">
+        <ConversationAutoScroll enabled={shouldAnchorLatestUser} trigger={latestUserMessageId} />
+        <ConversationContent className="mx-auto w-full min-w-80 max-w-[82%] pt-4 pb-12">
           {messages.length === 0 ? (
             <ConversationEmptyState
               title="开始查询聊天记录"
@@ -1997,6 +2358,19 @@ export default function AgentPage() {
               const isReasoningStreaming = isLastMessage && status === 'streaming' && lastPart?.type === 'reasoning'
               const chainActive = isLastMessage && busy
               const assistantText = message.role === 'assistant' ? messageTextOf(message) : ''
+              const assistantTextStreaming = message.role === 'assistant' && isLastMessage && status === 'streaming'
+              // 计划模式生成的消息：正文(执行计划)走 PlanCard 折叠卡片，不再走普通 Markdown 渲染。
+              // 完成后看 metadata.planMode；流式期间 metadata 还没回来，靠在途标记 runIsPlanRef 判定。
+              const isPlanMessage = message.role === 'assistant' && (
+                (message.metadata as AgentMessageMetadata | undefined)?.planMode === true
+                || (isLastMessage && busy && runIsPlanRef.current)
+              )
+              const assistantDisplayText = isPlanMessage ? stripPlanControlMarkers(assistantText) : assistantText
+              const planNeedsDelegateAnalysis = isPlanMessage && planRequiresDelegateAnalysis(assistantText)
+              const outputActivity = message.role === 'assistant'
+                ? analyzeMessageRenderActivity(assistantDisplayText, assistantTextStreaming)
+                : null
+              const outputActivitySteps = outputActivity ? renderOutputActivitySteps(outputActivity, assistantTextStreaming) : []
               const userDisplay = message.role === 'user' ? getUserMessageDisplay(message.parts) : null
               const persistedSubAgentEvents = message.role === 'assistant' ? readSubAgentProgressFromMessage(message) : []
               const subAgentEventsForMessage = message.role === 'assistant'
@@ -2006,7 +2380,7 @@ export default function AgentPage() {
                 <Message from={message.role} key={message.id}>
                   {userDisplay && <UserMessageMentions mentions={userDisplay.mentions} />}
                   <MessageContent>
-                    {chainParts.length > 0 && (
+                    {(chainParts.length > 0 || outputActivitySteps.length > 0) && (
                       <MessageChainOfThought active={chainActive}>
                         {chainParts.map((part, index) => {
                           if (part.type === 'reasoning') {
@@ -2060,13 +2434,33 @@ export default function AgentPage() {
                             </ChainOfThoughtStep>
                           )
                         })}
+                        {outputActivitySteps.map((step) => {
+                          const Icon = step.icon
+                          return (
+                            <ChainOfThoughtStep
+                              icon={Icon}
+                              key={`output-${step.key}`}
+                              label={renderChainLabel(step.active ? step.label : step.doneLabel, step.active)}
+                              status={step.active ? 'active' : 'complete'}
+                            />
+                          )
+                        })}
                       </MessageChainOfThought>
+                    )}
+                    {isPlanMessage && assistantDisplayText && (
+                      <PlanCard streaming={assistantTextStreaming} text={assistantDisplayText} />
                     )}
                     {message.parts.map((part, index) => {
                       if (part.type === 'text') {
+                        // 计划消息的正文已经在 PlanCard 里展示，这里不再重复渲染。
+                        if (isPlanMessage) return null
                         const displayText = userDisplay?.textByPartIndex.get(index) ?? part.text
                         if (!displayText) return null
-                        return <MessageResponse key={`text-${index}`}>{displayText}</MessageResponse>
+                        return (
+                          <MessageResponse isStreaming={assistantTextStreaming} key={`text-${index}`}>
+                            {displayText}
+                          </MessageResponse>
+                        )
                       }
                       if (part.type === 'file') {
                         return (
@@ -2082,19 +2476,49 @@ export default function AgentPage() {
                     )}
                     {message.role === 'assistant' && (
                       <MessageUsageStats
+                        canRegenerate={selectedModelSupportsTools}
                         copied={copiedMessageId === message.id}
                         metadata={message.metadata}
-                        messageText={assistantText}
-                        onCopy={() => { void handleCopyAssistantMessage(message.id, assistantText) }}
+                        messageText={assistantDisplayText}
+                        onCopy={() => { void handleCopyAssistantMessage(message.id, assistantDisplayText) }}
                         onOpenDetails={setUsageDetailsModal}
-                        onSpeak={() => handleSpeakAssistantMessage(message.id, assistantText)}
+                        onRegenerate={() => handleRegenerateAssistantMessage(messageIndex)}
+                        onSpeak={() => handleSpeakAssistantMessage(message.id, assistantDisplayText)}
+                        regenerating={busy}
                         speaking={speakingMessageId === message.id}
                       />
+                    )}
+                    {isPlanMessage && isLastMessage && !busy && (
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                        <HeroButton
+                          isDisabled={!selectedModelSupportsTools}
+                          onPress={handleExecutePlan}
+                          size="sm"
+                          variant="primary"
+                        >
+                          <Play className="size-3.5" />
+                          开始执行
+                        </HeroButton>
+                        {planNeedsDelegateAnalysis && (
+                          <span className="inline-flex items-center gap-1 rounded-(--agent-radius,12px) border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-amber-700 text-xs dark:text-amber-300">
+                            <Users className="size-3.5" />
+                            预计会委托子助手
+                          </span>
+                        )}
+                        <span className="text-muted-foreground text-xs">确认计划后点此执行，或直接回复修改计划</span>
+                      </div>
                     )}
                   </MessageContent>
                 </Message>
               )
             })
+          )}
+          {showAgentProgressChain && (
+            <Message from="assistant">
+              <MessageContent>
+                <AgentProgressChain active={status === 'submitted' || agentRunPending} events={agentProgress} />
+              </MessageContent>
+            </Message>
           )}
           {agentNotice && (
             <div className="mt-3 rounded-(--agent-radius,12px) border border-destructive/30 bg-destructive/5 px-3 py-2 text-destructive text-xs">
@@ -2102,21 +2526,21 @@ export default function AgentPage() {
             </div>
           )}
           {busy && subAgentProgress.length > 0 && !lastAssistantMessageHasDelegateTool && <SubAgentProgressPanel events={subAgentProgress} />}
-          {status === 'submitted' && <Loader />}
+          {status === 'submitted' && agentProgress.length === 0 && <Loader />}
         </ConversationContent>
         <ConversationScrollButton />
       </Conversation>
 
-      <div className="shrink-0">
+      <div className="shrink-0 pt-2 pb-4">
         <PromptInputProvider>
           <PromptInput
             accept="image/*,.txt,.md,.json,.csv"
-            className="mx-auto mb-3 w-full min-w-80 max-w-[82%] **:data-[slot=input-group]:rounded-(--agent-radius,12px) **:data-[slot=input-group]:border-border **:data-[slot=input-group]:bg-surface **:data-[slot=input-group]:shadow-xs"
+            className="mx-auto mb-2 w-full min-w-80 max-w-[82%] **:data-[slot=input-group]:rounded-(--agent-radius,12px) **:data-[slot=input-group]:border-border **:data-[slot=input-group]:bg-surface **:data-[slot=input-group]:shadow-xs"
             maxFiles={6}
             maxFileSize={8 * 1024 * 1024}
             multiple
             onSubmit={handleSubmit}
-            style={{ '--agent-radius': '14px' } as CSSProperties}
+            style={{ '--agent-radius': '22px' } as CSSProperties}
           >
             <PromptInputHeader className="flex-col items-stretch gap-2 border-b">
               <MentionField
@@ -2141,74 +2565,154 @@ export default function AgentPage() {
             </PromptInputBody>
 
             <PromptInputFooter>
-              <PromptInputTools className="flex-wrap">
-                <PromptInputActionMenu>
-                  <PromptInputActionMenuTrigger aria-label="更多输入操作" />
-                  <PromptInputActionMenuContent>
-                    <PromptInputActionAddAttachments label="添加图片或文件" />
-                    {PROMPT_PRESETS.map((preset) => (
-                      <PromptPresetMenuItem key={preset.label} {...preset} />
-                    ))}
-                  </PromptInputActionMenuContent>
-                </PromptInputActionMenu>
-                <MentionTriggerButton />
-                <PromptInputSpeechButton aria-label="语音输入" language="zh-CN" />
+              <PromptInputTools className="flex-wrap gap-2">
+                <ButtonGroup size="sm" variant="tertiary">
+                  <PromptInputActionMenu>
+                    <PromptInputActionMenuTrigger aria-label="更多输入操作" variant="tertiary" />
+                    <PromptInputActionMenuContent>
+                      <PromptInputActionAddAttachments label="添加图片或文件" />
+                      <Dropdown.Item
+                        id="plan-mode"
+                        textValue="计划模式"
+                        onAction={() => setPlanMode((value) => !value)}
+                      >
+                        <ListChecks className="size-4 shrink-0 text-muted" />
+                        <Label>计划模式</Label>
+                        <span className="ml-auto inline-flex pointer-events-none">
+                          <Switch aria-label="计划模式" isSelected={planMode}>
+                            <Switch.Control>
+                              <Switch.Thumb />
+                            </Switch.Control>
+                          </Switch>
+                        </span>
+                      </Dropdown.Item>
+                      <Dropdown.Item
+                        id="web-search"
+                        textValue="联网搜索"
+                        onAction={toggleWebSearch}
+                      >
+                        <Globe className="size-4 shrink-0 text-muted" />
+                        <Label>联网搜索</Label>
+                        <span className="ml-auto inline-flex pointer-events-none">
+                          <Switch aria-label="联网搜索" isSelected={webSearchOn}>
+                            <Switch.Control>
+                              <Switch.Thumb />
+                            </Switch.Control>
+                          </Switch>
+                        </span>
+                      </Dropdown.Item>
+                    </PromptInputActionMenuContent>
+                  </PromptInputActionMenu>
+                  <SlashPresetButton showGroupSeparator />
+                  <MentionTriggerButton showGroupSeparator />
+                  <PromptInputSpeechButton aria-label="语音输入" language="zh-CN" showGroupSeparator variant="tertiary" />
+                </ButtonGroup>
 
-                <PromptInputSelect
-                  onValueChange={(value) => setReasoningEffort(value as AgentReasoningEffort)}
-                  value={reasoningEffort}
-                >
-                  <PromptInputSelectTrigger aria-label="思考程度" className="h-8 gap-1.5 rounded-(--agent-radius,12px) px-2.5">
-                    <Brain className="size-3.5" />
-                    <PromptInputSelectValue />
-                  </PromptInputSelectTrigger>
-                  <PromptInputSelectContent align="start" position="popper" side="top">
-                    {REASONING_EFFORT_OPTIONS.map((option) => (
-                      <PromptInputSelectItem key={option.value} value={option.value}>
-                        {option.label}
-                      </PromptInputSelectItem>
-                    ))}
-                  </PromptInputSelectContent>
-                </PromptInputSelect>
+                {planMode && (
+                  <HeroButton
+                    aria-label="关闭计划模式"
+                    className="gap-1"
+                    onPress={() => setPlanMode(false)}
+                    size="sm"
+                    variant="secondary"
+                  >
+                    <ListChecks className="size-3.5" />
+                    计划模式
+                    <X className="size-3" />
+                  </HeroButton>
+                )}
 
-                <ModelSelector onOpenChange={setModelOpen} open={modelOpen}>
-                  <ModelSelectorTrigger asChild>
-                    <Button className="max-w-48 rounded-(--agent-radius,12px) border-border/60 bg-transparent hover:bg-accent/50" variant="outline">
-                      {selectedModelData?.chefSlug && (
-                        <AIProviderLogo providerId={selectedModelData.chefSlug} alt={selectedModelData.chef} className="shrink-0" size={18} />
-                      )}
-                      {selectedModelData?.name && (
-                        <ModelSelectorName>{selectedModelData.name}</ModelSelectorName>
-                      )}
-                    </Button>
-                  </ModelSelectorTrigger>
-                  <ModelSelectorContent>
-                    <ModelSelectorInput placeholder="搜索模型..." />
-                    <ModelSelectorList>
-                      <ModelSelectorEmpty>没有匹配的模型</ModelSelectorEmpty>
-                      {chefs.map((chef) => (
-                        <ModelSelectorGroup heading={chef} key={chef}>
-                          {models
-                            .filter((model) => model.chef === chef)
-                            .map((model) => (
-                              <ModelItem
-                                key={model.id}
-                                model={model}
-                                onSelect={handleModelSelect}
-                                selectedModel={selectedPresetId}
-                              />
-                            ))}
-                        </ModelSelectorGroup>
-                      ))}
-                    </ModelSelectorList>
-                  </ModelSelectorContent>
-                </ModelSelector>
+                {webSearchOn && (
+                  <HeroButton
+                    aria-label="关闭联网搜索"
+                    className="gap-1"
+                    onPress={toggleWebSearch}
+                    size="sm"
+                    variant="secondary"
+                  >
+                    <Globe className="size-3.5" />
+                    联网搜索
+                    <X className="size-3" />
+                  </HeroButton>
+                )}
+
+                <Separator orientation="vertical" variant="tertiary" />
+
+                <ButtonGroup size="sm" variant="tertiary">
+                  <Dropdown>
+                    <HeroButton aria-label="思考程度" size="sm" variant="tertiary">
+                      <Brain className="size-3.5" />
+                      {REASONING_EFFORT_OPTIONS.find((option) => option.value === reasoningEffort)?.label ?? '思考：自动'}
+                      <ChevronDown className="size-3.5" />
+                    </HeroButton>
+                    <Dropdown.Popover placement="top start">
+                      <Dropdown.Menu
+                        selectedKeys={new Set([reasoningEffort])}
+                        selectionMode="single"
+                        onAction={(key) => setReasoningEffort(key as AgentReasoningEffort)}
+                      >
+                        {REASONING_EFFORT_OPTIONS.map((option) => (
+                          <Dropdown.Item id={option.value} key={option.value} textValue={option.label}>
+                            <Dropdown.ItemIndicator />
+                            <Label>{option.label}</Label>
+                          </Dropdown.Item>
+                        ))}
+                      </Dropdown.Menu>
+                    </Dropdown.Popover>
+                  </Dropdown>
+                </ButtonGroup>
+
+                <ButtonGroup size="sm" variant="tertiary">
+                  <ModelSelector onOpenChange={setModelOpen} open={modelOpen}>
+                    <ModelSelectorTrigger asChild>
+                      <HeroButton className="max-w-48" size="sm" variant="tertiary">
+                        {selectedModelData?.chefSlug && (
+                          <AIProviderLogo providerId={selectedModelData.chefSlug} alt={selectedModelData.chef} className="shrink-0" size={18} />
+                        )}
+                        {selectedModelData?.name && (
+                          <ModelSelectorName>{selectedModelData.name}</ModelSelectorName>
+                        )}
+                      </HeroButton>
+                    </ModelSelectorTrigger>
+                    <ModelSelectorContent>
+                      <ModelSelectorInput placeholder="搜索模型..." />
+                      <ModelSelectorList>
+                        <ModelSelectorEmpty>没有匹配的模型</ModelSelectorEmpty>
+                        {chefs.map((chef) => (
+                          <ModelSelectorGroup heading={chef} key={chef}>
+                            {models
+                              .filter((model) => model.chef === chef)
+                              .map((model) => (
+                                <ModelItem
+                                  key={model.id}
+                                  model={model}
+                                  onSelect={handleModelSelect}
+                                  selectedModel={selectedPresetId}
+                                />
+                              ))}
+                          </ModelSelectorGroup>
+                        ))}
+                      </ModelSelectorList>
+                    </ModelSelectorContent>
+                  </ModelSelector>
+                </ButtonGroup>
+
               </PromptInputTools>
 
-              <AgentPromptSubmit busy={busy} status={status} />
+              <ButtonGroup size="sm">
+                <AgentPromptSubmit busy={busy} status={status} />
+              </ButtonGroup>
             </PromptInputFooter>
           </PromptInput>
         </PromptInputProvider>
+        {conversationUsage.hasAny && (
+          <div className="mx-auto mb-1 flex w-full min-w-80 max-w-[82%] flex-wrap items-center justify-end gap-x-3 gap-y-0.5 px-2 text-[11px] text-muted-foreground">
+            <span>本次会话Token用量</span>
+            <span>输入 {formatTokenCount(conversationUsage.input)}</span>
+            <span>输出 {formatTokenCount(conversationUsage.output)}</span>
+            <span className="font-medium text-foreground/80">共 {formatTokenCount(conversationUsage.total)}</span>
+          </div>
+        )}
       </div>
       {usageDetailsModal !== null && (
         <UsageDetailsModal

@@ -73,8 +73,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // AI Agent（主进程 broker → AI 子进程；流式 chunk 经 agent:chunk 推回）
   agent: {
-    run: (runId: string, messages: unknown[], scope?: unknown, modelConfig?: unknown, conversationId?: number | null) =>
-      ipcRenderer.invoke('agent:run', { runId, messages, scope, modelConfig, conversationId }) as Promise<{ success: boolean; error?: string }>,
+    run: (runId: string, messages: unknown[], scope?: unknown, modelConfig?: unknown, conversationId?: number | null, planMode?: boolean) =>
+      ipcRenderer.invoke('agent:run', { runId, messages, scope, modelConfig, conversationId, planMode }) as Promise<{ success: boolean; error?: string }>,
     abort: (runId: string) => ipcRenderer.invoke('agent:abort', runId) as Promise<{ success: boolean }>,
     generateTitle: (firstMessage: string, modelConfig?: unknown) =>
       ipcRenderer.invoke('agent:generateTitle', { firstMessage, modelConfig }) as Promise<{ success: boolean; title?: string; error?: string }>,
@@ -158,6 +158,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getConfig: () => ipcRenderer.invoke('rerank:getConfig') as Promise<{ success: boolean; config?: unknown; error?: string }>,
     setConfig: (patch: unknown) => ipcRenderer.invoke('rerank:setConfig', patch) as Promise<{ success: boolean; config?: unknown; error?: string }>,
     test: (cfg: unknown) => ipcRenderer.invoke('rerank:test', cfg) as Promise<{ success: boolean; error?: string }>,
+  },
+
+  // 联网搜索（Tavily）—— AI Agent web_search 工具
+  webSearch: {
+    getConfig: () => ipcRenderer.invoke('webSearch:getConfig') as Promise<{ success: boolean; config?: unknown; error?: string }>,
+    setConfig: (patch: unknown) => ipcRenderer.invoke('webSearch:setConfig', patch) as Promise<{ success: boolean; config?: unknown; error?: string }>,
+    test: (cfg: unknown) => ipcRenderer.invoke('webSearch:test', cfg) as Promise<{ success: boolean; resultCount?: number; error?: string }>,
   },
 
   // 数据库操作

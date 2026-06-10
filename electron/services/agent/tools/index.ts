@@ -22,6 +22,7 @@ import { searchMoments, momentsStats } from './moments'
 import { createRemember, createRecall, createListMemories, createForget, createConsolidate } from './memory'
 import { createDelegateAnalysis } from './delegateAnalysis'
 import { buildMcpTools } from './mcpExternal'
+import { webSearch } from './webSearch'
 
 /** 基础读/查工具（不含 delegate_analysis），主 Agent 与子 Agent 共用。 */
 export function buildBaseTools(_scope: AgentScope): ToolSet {
@@ -60,10 +61,19 @@ export function buildSubAgentTools(_scope: AgentScope): ToolSet {
   }
 }
 
-export function buildTools(scope: AgentScope, providerConfig: AgentProviderConfig, mcpTools: AgentMcpToolDescriptor[] = []): ToolSet {
+/** 计划模式只保留轻量解析工具，避免计划轮直接读取/统计/总结用户数据。 */
+export function buildPlanModeTools(_scope: AgentScope): ToolSet {
+  return {
+    list_contacts: listContacts,
+    list_groups: listGroups,
+  }
+}
+
+export function buildTools(scope: AgentScope, providerConfig: AgentProviderConfig, mcpTools: AgentMcpToolDescriptor[] = [], enableWebSearch = false): ToolSet {
   return {
     ...buildBaseTools(scope),
     ...buildMcpTools(mcpTools),
+    ...(enableWebSearch ? { web_search: webSearch } : {}),
     remember: createRemember(scope),
     recall: createRecall(scope),
     list_memories: createListMemories(scope),

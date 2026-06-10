@@ -5,9 +5,10 @@
 import { generateText, ToolLoopAgent, stepCountIs, type ModelMessage, type UIMessageChunk } from 'ai'
 import type { SystemModelMessage } from '@ai-sdk/provider-utils'
 import { createLanguageModel } from './provider'
-import { buildAgentPromptParts } from './prompts'
+import { buildAgentPromptParts, PLAN_MODE_PROMPT, WEB_SEARCH_PROMPT } from './prompts'
+import { isWebSearchAvailable } from '../ai/webSearchService'
 import { applyAnthropicCacheControl, buildPromptCacheKey, buildProviderOptions } from './cache'
-import { buildTools } from './tools'
+import { buildPlanModeTools, buildTools } from './tools'
 import { buildMemoryContext, extractMemories, preloadRelevantMemories } from './tools/memory'
 import { compactMessages } from './compaction'
 import { runFinalReview, summarizeToolOutput, type ToolOutputSummary } from './finalReview'
@@ -24,9 +25,16 @@ export function buildAgentInstructions(
   memoryContext: string,
   relevantMemoryContext: string,
   tools: ReturnType<typeof buildTools>,
+  webSearchOn = false,
 ): { instructions: SystemModelMessage[]; tools: ReturnType<typeof buildTools>; promptCacheKey: string } {
   const promptParts = buildAgentPromptParts(input.scope, input.skills)
-  const dynamicSystem = [promptParts.dynamicSystem, memoryContext, relevantMemoryContext].filter(Boolean).join('\n')
+  const dynamicSystem = [
+    promptParts.dynamicSystem,
+    input.planMode ? PLAN_MODE_PROMPT : '',
+    webSearchOn ? WEB_SEARCH_PROMPT : '',
+    memoryContext,
+    relevantMemoryContext,
+  ].filter(Boolean).join('\n')
   const instructions: SystemModelMessage[] = [
     { role: 'system', content: promptParts.cacheableSystem },
     ...(dynamicSystem ? [{ role: 'system' as const, content: dynamicSystem }] : []),
@@ -177,12 +185,17 @@ export async function runAgent(
   onProgress?: AgentProgressReporter,
 ): Promise<void> {
   await withAgentProgress(onProgress, async () => {
-    reportAgentProgress({ stage: 'run_started', title: '开始分析聊天记录' })
     const userText = lastUserText(input.messages)
+    reportAgentProgress({ stage: 'run_started', title: '正在加载长期记忆' })
     const memoryContext = await buildMemoryContext(input.scope)
+    reportAgentProgress({ stage: 'run_started', title: '正在召回相关记忆' })
     const relevantMemoryContext = await preloadRelevantMemories(userText, input.scope)
-    const baseTools = withToolTimeouts(buildTools(input.scope, input.providerConfig, input.mcpTools))
-    const prepared = buildAgentInstructions(input, memoryContext, relevantMemoryContext, baseTools)
+    reportAgentProgress({ stage: 'run_started', title: '正在准备工具' })
+    const webSearchOn = isWebSearchAvailable()
+    const baseTools = withToolTimeouts(input.planMode
+      ? buildPlanModeTools(input.scope)
+      : buildTools(input.scope, input.providerConfig, input.mcpTools, webSearchOn))
+    const prepared = buildAgentInstructions(input, memoryContext, relevantMemoryContext, baseTools, webSearchOn)
     const agent = new ToolLoopAgent({
       model: createLanguageModel(input.providerConfig),
       instructions: prepared.instructions,
@@ -198,6 +211,7 @@ export async function runAgent(
       }),
     })
 
+    reportAgentProgress({ stage: 'run_started', title: '正在请求模型' })
     const result = await agent.stream({ messages: input.messages, abortSignal: signal })
     // 截留 message 的 finish，等 L1 自动记忆注入完再补发，让自动写入的工具 part 落在本条消息内
     let finishChunk: UIMessageChunk | undefined
@@ -212,6 +226,7 @@ export async function runAgent(
           rawFinishReason: part.rawFinishReason,
           modelProvider: input.providerConfig.name,
           modelId: input.providerConfig.model,
+          ...(input.planMode ? { planMode: true } : {}),
         }
       },
     })) {

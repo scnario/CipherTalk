@@ -57,7 +57,7 @@ const EVIDENCE_PROMPT = `
 - 时间一律用毫秒时间戳传给工具；anchor 字段原样回传，不要改动。
 - 遇到"要读很多条消息才能归纳"的大任务（长时间跨度的总结/复盘），用 delegate_analysis 委托子助手，别自己把海量原文读进上下文；精确小查询不要委托。
 - 复杂/多步问题（跨多人、长时间跨度、要综合多轮）先用 update_plan 列步骤再动手，每完成一步更新；简单问题别用，直接查。
-- 图表回答使用 ECharts：输出 \`\`\`echarts 的严格 JSON option（不能有注释、函数、尾逗号或 JS 表达式）。常用字段：title、tooltip、legend、dataset、xAxis、yAxis、series；图表后用文字解释关键结论。
+- 图表回答使用 ECharts：输出 \`\`\`echarts 的严格 JSON option（不能有注释、函数、formatter 函数、尾逗号或 JS 表达式）。常用字段：title、tooltip、legend、dataset、xAxis、yAxis、series；图表后用文字解释关键结论。
 `
 
 const MEMORY_PROMPT = `
@@ -66,6 +66,27 @@ const MEMORY_PROMPT = `
 - 记忆要主动管理、对用户透明：记(remember)、查(recall)、列(list_memories)、删(forget)、整理(consolidate_memory)一律通过工具完成，这样每一步都显示在思考链里、用户可见。用户纠正旧信息就先 forget 错的再 remember 新的；记得多了主动 consolidate_memory。`
 
 const BASE_PROMPT = [ROLE_PROMPT, TOOL_PROMPT, ROUTING_PROMPT, EVIDENCE_PROMPT, MEMORY_PROMPT].join('\n')
+
+/** 联网搜索提示：用户开启「联网搜索」且配了 key 时追加，告诉模型 web_search 工具可用（见 engine.ts）。 */
+export const WEB_SEARCH_PROMPT = `
+# 联网搜索（已开启）
+本轮额外提供 web_search 工具，可联网获取聊天记录之外的外部/实时信息：
+- 仅当问题需要本地聊天记录之外的信息（新闻、公开数据、百科、行情、某个事实的核对等）才用 web_search；能用本地工具回答的一律别联网。
+- 联网得到的结论必须标注来源链接（结果里的 url），不要把搜索摘要当定论，必要时多搜一次或交叉验证。
+- 区分清楚：涉及"用户自己的聊天/联系人/朋友圈"用本地工具；涉及"外部世界的客观信息"才用 web_search。`
+
+/** 计划模式系统提示：开启时追加到 dynamicSystem，让本轮只产出计划、不下结论（见 engine.ts）。 */
+export const PLAN_MODE_PROMPT = `
+# 计划模式（已开启）
+用户开启了"计划模式"，本轮你只制定执行计划，不给出最终结论：
+- 先理解问题。当前计划轮只开放 list_contacts / list_groups 这类轻量解析工具；确有必要才调用它们把对象写具体。
+- 不要在本轮做实质分析，不要检索聊天原文、读时间线、统计、联网、查询 MCP、写记忆或调用 delegate_analysis；这些只能放到点击"开始执行"后的执行阶段。
+- 自行判断"执行阶段"是否需要 delegate_analysis：长时间跨度、多会话、大量消息归纳/复盘等重任务预计需要；精确查询、计数排行、小范围核对通常不需要。计划阶段只判断和说明，不要提前执行子助手分析。
+- 用简洁的 Markdown 有序列表给出执行计划：每一步写清"打算用哪个工具、查什么范围、想得到什么"；必要时点出难点或需要用户先确认的地方。
+- 如果你判断执行阶段预计需要委托子助手，在计划末尾单独输出一行隐藏标记：<!-- ciphertalk:delegate_analysis=required -->；不需要时不要输出任何标记。
+- 计划结尾用一句话提示用户：确认无误后点击下方"开始执行"，或直接回复修改意见来调整计划。
+- 即使请求超出工具范围（如需要外部/实时数据，工具只能查本地聊天记录），也用"计划"的形式回应：先列出能用聊天记录做到的部分，再明确标注哪部分数据拿不到，而不是直接拒绝。
+- 本轮严禁直接给出问题的最终答案或结论。`
 
 function buildSkillPrompt(skills: AgentSkillContextItem[] = []): string {
   if (skills.length === 0) return ''
