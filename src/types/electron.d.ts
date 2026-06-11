@@ -184,6 +184,29 @@ export interface ElectronAPI {
     setTldCache: (tlds: string[]) => Promise<void>
     onChanged: (callback: (payload: { key: string; value: unknown }) => void) => () => void
   }
+  pet: {
+    listInstalled: () => Promise<{ success: boolean; pets?: Array<{ slug: string; displayName: string; description: string; builtin?: boolean }>; error?: string }>
+    manifest: (force?: boolean) => Promise<{ success: boolean; pets?: Array<{ slug: string; displayName: string; kind?: string; submittedBy?: string; spritesheetUrl: string; petJsonUrl: string }>; error?: string }>
+    install: (slug: string) => Promise<{ success: boolean; pet?: { slug: string; displayName: string; description: string; builtin?: boolean }; error?: string }>
+    remove: (slug: string) => Promise<{ success: boolean; error?: string }>
+    importZip: () => Promise<{ success: boolean; canceled?: boolean; pet?: { slug: string; displayName: string; description: string; builtin?: boolean }; error?: string }>
+    getSprite: (slug: string) => Promise<{ success: boolean; dataUrl?: string; error?: string }>
+    setAgentState: (state: string) => void
+    toggleDesktopWindow: (enabled: boolean) => Promise<{ success: boolean }>
+    setBubble: (expanded: boolean) => void
+    showContextMenu: () => void
+    onAgentState: (callback: (state: string) => void) => () => void
+    onWindowMove: (callback: (x: number) => void) => () => void
+    onBubbleFrame: (callback: (frame: { expanded: boolean; baseLeft: number; baseTop: number; baseWidth: number; baseHeight: number }) => void) => () => void
+    onContextMenuOpened: (callback: () => void) => () => void
+    onNotify: (callback: (payload: { username: string; displayName: string; avatarUrl?: string; preview: string; timestamp: number }) => void) => () => void
+  }
+  notify: {
+    getEnabledSessions: () => Promise<string[]>
+    setSessionEnabled: (username: string, enabled: boolean) => Promise<{ success: boolean }>
+    setActiveSession: (sessionId: string | null) => void
+    activate: () => void
+  }
   accounts: {
     list: () => Promise<AccountProfile[]>
     getActive: () => Promise<AccountProfile | null>
@@ -258,8 +281,8 @@ export interface ElectronAPI {
       minimumSupportedVersion?: string
       reason?: 'minimum-version' | 'blocked-version'
       checkedAt: number
-      updateSource: 'github' | 'custom' | 'none'
-      policySource: 'github' | 'custom' | 'none'
+      updateSource: 'r2' | 'github' | 'custom' | 'none'
+      policySource: 'r2' | 'github' | 'custom' | 'none'
       diagnostics?: {
         phase: 'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'installing' | 'failed'
         strategy: 'unknown' | 'differential' | 'full'
@@ -274,14 +297,14 @@ export interface ElectronAPI {
       }
     } | null>
     getUpdateSourceInfo: () => Promise<{
-      primaryUpdateSource: 'github'
+      primaryUpdateSource: 'r2'
+      r2UpdateBaseUrl: string
       githubRepository: {
         owner: string
         repo: string
       }
-      policySources: Array<'github' | 'custom'>
-      policyPrecedence: 'github'
-      forceUpdatePolicyFallbackUrl: string
+      policySources: Array<'r2' | 'github'>
+      policyPrecedence: 'r2'
     }>
     getMcpLaunchConfig: () => Promise<{
       command: string
@@ -300,8 +323,8 @@ export interface ElectronAPI {
       minimumSupportedVersion?: string
       reason?: 'minimum-version' | 'blocked-version'
       checkedAt: number
-      updateSource: 'github' | 'custom' | 'none'
-      policySource: 'github' | 'custom' | 'none'
+      updateSource: 'r2' | 'github' | 'custom' | 'none'
+      policySource: 'r2' | 'github' | 'custom' | 'none'
       diagnostics?: {
         phase: 'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'installing' | 'failed'
         strategy: 'unknown' | 'differential' | 'full'
@@ -316,14 +339,14 @@ export interface ElectronAPI {
       }
     } | null>
     getUpdateSourceInfo: () => Promise<{
-      primaryUpdateSource: 'github'
+      primaryUpdateSource: 'r2'
+      r2UpdateBaseUrl: string
       githubRepository: {
         owner: string
         repo: string
       }
-      policySources: Array<'github' | 'custom'>
-      policyPrecedence: 'github'
-      forceUpdatePolicyFallbackUrl: string
+      policySources: Array<'r2' | 'github'>
+      policyPrecedence: 'r2'
     }>
     checkForUpdates: () => Promise<{
       hasUpdate: boolean
@@ -336,8 +359,8 @@ export interface ElectronAPI {
       minimumSupportedVersion?: string
       reason?: 'minimum-version' | 'blocked-version'
       checkedAt: number
-      updateSource: 'github' | 'custom' | 'none'
-      policySource: 'github' | 'custom' | 'none'
+      updateSource: 'r2' | 'github' | 'custom' | 'none'
+      policySource: 'r2' | 'github' | 'custom' | 'none'
       diagnostics?: {
         phase: 'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'installing' | 'failed'
         strategy: 'unknown' | 'differential' | 'full'
@@ -365,8 +388,8 @@ export interface ElectronAPI {
       minimumSupportedVersion?: string
       reason?: 'minimum-version' | 'blocked-version'
       checkedAt: number
-      updateSource: 'github' | 'custom' | 'none'
-      policySource: 'github' | 'custom' | 'none'
+      updateSource: 'r2' | 'github' | 'custom' | 'none'
+      policySource: 'r2' | 'github' | 'custom' | 'none'
       diagnostics?: {
         phase: 'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'installing' | 'failed'
         strategy: 'unknown' | 'differential' | 'full'

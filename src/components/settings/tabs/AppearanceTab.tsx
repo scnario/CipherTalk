@@ -1,8 +1,9 @@
-import { useState, type CSSProperties } from 'react'
+import { useRef, useState, type CSSProperties } from 'react'
 import { Description, Label, Radio, RadioGroup, Slider, Switch, Tabs, type Key } from '@heroui/react'
 import { ImageIcon, Moon, Monitor, PanelBottom, PanelLeft, Sun, Upload, Video } from 'lucide-react'
 import {
   HOME_BACKGROUND_PRESETS,
+  getHomeBackgroundPresetPoster,
   getHomeBackgroundPresetSrc,
   useThemeStore,
   type HomeBackgroundPreset,
@@ -29,6 +30,32 @@ const normalizeImageSrc = (value?: string): string | undefined => {
 const getAvatarFallback = (name?: string, wxid?: string): string => {
   const text = (name || wxid || '我').trim()
   return text.slice(0, 2) || '我'
+}
+
+/**
+ * 背景视频预览：默认只展示静态画面，悬停才播放。
+ * 有 poster（预设视频的抽帧图）时用 preload="none"，挂载时完全不初始化解码器，
+ * 消除进入外观页的卡顿；无 poster（自定义视频）时退回 #t=0.1 画首帧。
+ */
+function HoverPlayVideo({ src, poster, className, style }: { src: string; poster?: string; className?: string; style?: CSSProperties }) {
+  const ref = useRef<HTMLVideoElement>(null)
+  return (
+    <video
+      aria-hidden="true"
+      className={className}
+      muted
+      loop
+      playsInline
+      poster={poster}
+      preload={poster ? 'none' : 'metadata'}
+      ref={ref}
+      src={(poster || src.includes('#')) ? src : `${src}#t=0.1`}
+      style={style}
+      title="悬停预览"
+      onMouseEnter={() => { void ref.current?.play().catch(() => undefined) }}
+      onMouseLeave={() => { ref.current?.pause() }}
+    />
+  )
 }
 
 function AppearanceTab() {
@@ -58,6 +85,7 @@ function AppearanceTab() {
   const customBackgroundReady = Boolean(homeBackground.customUrl)
     && (homeBackground.customType === 'image' || homeBackground.customType === 'video')
   const presetBackgroundSrc = getHomeBackgroundPresetSrc(homeBackground.preset)
+  const presetBackgroundPoster = getHomeBackgroundPresetPoster(homeBackground.preset)
   const backgroundPreviewStyle = {
     '--home-background-preview-blur': `${homeBackground.blur}px`
   } as CSSProperties
@@ -172,16 +200,11 @@ function AppearanceTab() {
                     <Radio.Indicator />
                   </Radio.Control>
                   <Radio.Content className="home-background-preset-radio-content">
-                    <video
+                    <HoverPlayVideo
                       className="home-background-preset-video"
+                      poster={preset.poster}
                       src={preset.src}
-                      autoPlay
-                      muted
-                      loop
-                      playsInline
-                      preload="metadata"
                       style={backgroundPreviewStyle}
-                      aria-hidden="true"
                     />
                     <span className="home-background-preset-overlay">{preset.label}</span>
                   </Radio.Content>
@@ -197,10 +220,10 @@ function AppearanceTab() {
                   homeBackground.customType === 'image' ? (
                     <img src={homeBackground.customUrl} alt="" decoding="async" loading="lazy" style={backgroundPreviewStyle} />
                   ) : (
-                    <video src={homeBackground.customUrl} autoPlay muted loop playsInline style={backgroundPreviewStyle} />
+                    <HoverPlayVideo src={homeBackground.customUrl} style={backgroundPreviewStyle} />
                   )
                 ) : (
-                  <video src={presetBackgroundSrc} autoPlay muted loop playsInline style={backgroundPreviewStyle} />
+                  <HoverPlayVideo poster={presetBackgroundPoster} src={presetBackgroundSrc} style={backgroundPreviewStyle} />
                 )}
                 <span className="home-background-preview-badge">
                   {customBackgroundReady

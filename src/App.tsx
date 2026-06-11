@@ -25,6 +25,8 @@ import BrowserWindowPage from './pages/BrowserWindowPage'
 import SplashPage from './pages/SplashPage'
 import ChatHistoryPage from './pages/ChatHistoryPage'
 import MomentsWindow from './pages/MomentsWindow'
+import PetWindow from './pages/PetWindow'
+import PetsPage from './pages/PetsPage'
 import { useAppStore } from './stores/appStore'
 import { useThemeStore } from './stores/themeStore'
 import { useChatStore } from './stores/chatStore'
@@ -49,8 +51,8 @@ type AppUpdateInfo = {
   minimumSupportedVersion?: string
   reason?: 'minimum-version' | 'blocked-version'
   checkedAt: number
-  updateSource: 'github' | 'custom' | 'none'
-  policySource: 'github' | 'custom' | 'none'
+  updateSource: 'r2' | 'github' | 'custom' | 'none'
+  policySource: 'r2' | 'github' | 'custom' | 'none'
   diagnostics?: {
     phase: 'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'installing' | 'failed'
     strategy: 'unknown' | 'differential' | 'full'
@@ -348,7 +350,7 @@ function App() {
       description: (
         <>
           <div>v{updateInfo.version} 已发布</div>
-          <div>更新源：{updateInfo.updateSource === 'github' ? 'GitHub Release' : '未知'}</div>
+          <div>更新源：{updateInfo.updateSource === 'r2' ? 'R2 镜像' : updateInfo.updateSource === 'github' ? 'GitHub Release' : '未知'}</div>
         </>
       ),
       onClose: () => {
@@ -370,7 +372,7 @@ function App() {
   // 启动时自动检查配置并连接数据库
   useEffect(() => {
     // 独立窗口不需要自动连接主数据库
-    if (isChatWindow || isMomentsWindow || isAgreementWindow || isWelcomeWindow || location.pathname === '/image-viewer-window') return
+    if (isChatWindow || isMomentsWindow || isAgreementWindow || isWelcomeWindow || location.pathname === '/image-viewer-window' || location.pathname === '/pet-window') return
 
     const autoConnect = async () => {
       try {
@@ -481,6 +483,11 @@ function App() {
   // 独立视频播放窗口
   if (location.pathname === '/video-player-window') {
     return <VideoWindow />
+  }
+
+  // 桌面悬浮桌宠窗口
+  if (location.pathname === '/pet-window') {
+    return <PetWindow />
   }
 
   // 独立协议窗口
@@ -619,7 +626,7 @@ function App() {
   }
 
   // 主窗口 - 完整布局
-  const disableContentOverflow = ['/data-management', '/settings', '/open-api', '/mcp', '/agent'].includes(location.pathname)
+  const disableContentOverflow = ['/data-management', '/settings', '/open-api', '/mcp', '/agent', '/pets'].includes(location.pathname)
   const fullPageRoutes = ['/home']
   const isFullPage = fullPageRoutes.includes(location.pathname)
   const edgeToEdgeRoutes: string[] = []
@@ -648,8 +655,8 @@ function App() {
               <div>当前版本：v{updateInfo.currentVersion}</div>
               {updateInfo.version && <div>目标版本：v{updateInfo.version}</div>}
               {updateInfo.minimumSupportedVersion && <div>最低安全版本：v{updateInfo.minimumSupportedVersion}</div>}
-              <div>更新来源：{updateInfo.updateSource === 'github' ? 'GitHub Release' : '未检测到普通更新源'}</div>
-              <div>策略来源：{updateInfo.policySource === 'github' ? 'GitHub 策略源' : updateInfo.policySource === 'custom' ? '自定义策略源' : '无'}</div>
+              <div>更新来源：{updateInfo.updateSource === 'r2' ? 'R2 镜像' : updateInfo.updateSource === 'github' ? 'GitHub Release' : '未检测到普通更新源'}</div>
+              <div>策略来源：{updateInfo.policySource === 'r2' ? 'R2 策略源' : updateInfo.policySource === 'github' ? 'GitHub 策略源' : updateInfo.policySource === 'custom' ? '自定义策略源' : '无'}</div>
             </div>
 
             {updateInfo.releaseNotes && (
@@ -701,6 +708,7 @@ function App() {
               <Route path="/open-api" element={<OpenApiPage />} />
               <Route path="/mcp" element={<McpPage />} />
               <Route path="/agent" element={<AgentPage />} />
+              <Route path="/pets" element={<PetsPage />} />
               <Route path="/export" element={<ExportPage />} />
               <Route path="/transcription-assistant" element={<TranscriptionAssistantPage />} />
               <Route path="/chat-history/:sessionId/:messageId" element={<ChatHistoryPage />} />

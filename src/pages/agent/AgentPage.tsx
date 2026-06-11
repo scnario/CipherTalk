@@ -5,7 +5,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type UIEvent } from 'react'
 import { useChat } from '@ai-sdk/react'
 import { isToolUIPart, type ChatStatus, type UIMessage } from 'ai'
-import { Button as HeroButton, ButtonGroup, Dropdown, Label, Modal, Separator, Surface, Switch, Table } from '@heroui/react'
+import { AlertDialog, Button as HeroButton, ButtonGroup, Dropdown, Header, Label, Modal, Separator, Surface, Switch, Table, Toolbar } from '@heroui/react'
 import { AtSign, BarChart3, Braces, Brain, CheckIcon, ChevronDown, Clock3, Code2, Copy, FileText, Globe, History, Image as ImageIcon, Info, Link2, ListChecks, PenLine, Play, Quote, RefreshCcw, Search, Slash, SquarePen, Table2, Trash2, Users, Volume2, Wrench, X, Sparkles } from 'lucide-react'
 import { Sources, SourcesContent, SourcesTrigger } from '@/components/ai-elements/sources'
 import { HoverCard, HoverCardContent, HoverCardTrigger } from '@/components/ui/hover-card'
@@ -36,17 +36,6 @@ import {
   type PromptInputMessage,
   usePromptInputController,
 } from '@/components/ai-elements/prompt-input'
-import {
-  ModelSelector,
-  ModelSelectorContent,
-  ModelSelectorEmpty,
-  ModelSelectorGroup,
-  ModelSelectorInput,
-  ModelSelectorItem,
-  ModelSelectorList,
-  ModelSelectorName,
-  ModelSelectorTrigger,
-} from '@/components/ai-elements/model-selector'
 import { Button } from '@/components/ui/button'
 import AIProviderLogo from '@/components/ai/AIProviderLogo'
 import { getAIProviders, type AIModelInfo, type AIProviderInfo } from '@/types/ai'
@@ -99,6 +88,7 @@ function SlashPresetButton({ showGroupSeparator = false }: { showGroupSeparator?
   )
   const [manualOpen, setManualOpen] = useState(false)
   const isOpen = manualOpen || query !== null
+  const applyingPresetRef = useRef(false)
 
   const openSlashMenu = () => {
     const v = textInput.value
@@ -106,7 +96,29 @@ function SlashPresetButton({ showGroupSeparator = false }: { showGroupSeparator?
     setManualOpen(true)
   }
 
+  const cancelSlashMenu = () => {
+    setManualOpen(false)
+    if (query === null) return
+    const slashIdx = value.lastIndexOf('/')
+    const prefix = slashIdx >= 0 ? value.slice(0, slashIdx).trimEnd() : value
+    textInput.setInput(prefix)
+  }
+
+  const handleOpenChange = (open: boolean) => {
+    if (open) {
+      setManualOpen(true)
+      return
+    }
+    if (applyingPresetRef.current) {
+      applyingPresetRef.current = false
+      setManualOpen(false)
+      return
+    }
+    cancelSlashMenu()
+  }
+
   const applyPreset = (text: string) => {
+    applyingPresetRef.current = true
     if (query !== null) {
       const slashIdx = value.lastIndexOf('/')
       const prefix = slashIdx >= 0 ? value.slice(0, slashIdx).trimEnd() : ''
@@ -118,7 +130,7 @@ function SlashPresetButton({ showGroupSeparator = false }: { showGroupSeparator?
   }
 
   return (
-    <Dropdown isOpen={isOpen} onOpenChange={setManualOpen}>
+    <Dropdown isOpen={isOpen} onOpenChange={handleOpenChange}>
       <HeroButton aria-label="打开预设" isIconOnly size="sm" variant="tertiary" onPress={openSlashMenu}>
         {showGroupSeparator && <ButtonGroup.Separator />}
         <Slash className="size-3.5" />
@@ -179,20 +191,17 @@ function ModelCapabilityIcons({ detail }: { detail: AIModelInfo }) {
 }
 
 const ModelItem = memo(
-  ({ model, selectedModel, onSelect }: { model: AgentModelItem; selectedModel: string; onSelect: (id: string) => void }) => {
-    const handleSelect = useCallback(() => {
-      if (!model.disabled) onSelect(model.id)
-    }, [model.disabled, model.id, onSelect])
+  ({ model }: { model: AgentModelItem }) => {
     return (
-      <ModelSelectorItem disabled={model.disabled} key={model.id} onSelect={handleSelect} value={model.id}>
+      <Dropdown.Item id={model.id} key={model.id} textValue={model.name}>
+        <Dropdown.ItemIndicator />
         {model.chefSlug && <AIProviderLogo providerId={model.chefSlug} alt={model.chef} className="shrink-0" size={20} />}
-        <ModelSelectorName>{model.name}</ModelSelectorName>
+        <Label className="min-w-0 flex-1 truncate text-left">{model.name}</Label>
         <span className="ml-auto flex shrink-0 items-center gap-1.5">
           {model.modelDetail && <ModelCapabilityIcons detail={model.modelDetail} />}
           {model.disabled && <span className="text-[10px] text-muted-foreground">无工具</span>}
-          {selectedModel === model.id ? <CheckIcon className="size-4" /> : <div className="size-4" />}
         </span>
-      </ModelSelectorItem>
+      </Dropdown.Item>
     )
   }
 )
@@ -371,22 +380,40 @@ function toolPartProgressKey(part: unknown, toolName: string) {
   return toolProgressKey(toolName, toolCallId)
 }
 
-function getDelegateTask(part: unknown): string | undefined {
+function getDelegateTasks(part: unknown): string[] {
   const input = (part as { input?: unknown }).input
-  if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return []
+  const tasks = (input as { tasks?: unknown }).tasks
+  if (Array.isArray(tasks)) {
+    return tasks
+      .map((item) => {
+        if (!item || typeof item !== 'object') return ''
+        const task = (item as { task?: unknown }).task
+        return typeof task === 'string' ? task.trim() : ''
+      })
+      .filter(Boolean)
+  }
   const task = (input as { task?: unknown }).task
-  return typeof task === 'string' && task.trim() ? task.trim() : undefined
+  return typeof task === 'string' && task.trim() ? [task.trim()] : []
 }
 
-const SUB_AGENT_PROGRESS_LIMIT = 12
+const SUB_AGENT_PROGRESS_LIMIT = 48
 const AGENT_PENDING_TITLE = '正在准备请求'
 
+function subAgentProgressGroupKey(progress: AgentProgressEvent) {
+  return [
+    progress.parentToolCallId || 'delegate',
+    progress.subTaskId || progress.subTaskTitle || 'single',
+  ].join(':')
+}
+
 function subAgentProgressKey(progress: AgentProgressEvent) {
-  if (progress.toolCallId) return `call:${progress.toolCallId}`
+  const groupKey = subAgentProgressGroupKey(progress)
+  if (progress.toolCallId) return `${groupKey}:call:${progress.toolCallId}`
   if (progress.toolName && (progress.stage === 'tool_started' || progress.stage === 'tool_finished' || progress.stage === 'error')) {
-    return `tool:${progress.depth ?? 0}:${progress.toolName}`
+    return `${groupKey}:tool:${progress.depth ?? 0}:${progress.toolName}`
   }
-  return `event:${progress.depth ?? 0}:${progress.stage}:${progress.title}:${progress.sessionId ?? ''}`
+  return `${groupKey}:event:${progress.depth ?? 0}:${progress.stage}:${progress.title}:${progress.sessionId ?? ''}`
 }
 
 function mergeSubAgentProgress(prev: AgentProgressEvent[], progress: AgentProgressEvent) {
@@ -494,11 +521,48 @@ function subAgentPanelTitle(latest: AgentProgressEvent) {
   return '子助手运行中'
 }
 
-function SubAgentProgressPanel({ events, task }: { events: AgentProgressEvent[]; task?: string }) {
+type SubAgentProgressGroup = {
+  key: string
+  title: string
+  events: AgentProgressEvent[]
+  latest: AgentProgressEvent
+}
+
+function groupSubAgentProgress(events: AgentProgressEvent[]): SubAgentProgressGroup[] {
+  const groups = new Map<string, AgentProgressEvent[]>()
+  for (const event of events) {
+    const key = subAgentProgressGroupKey(event)
+    groups.set(key, [...(groups.get(key) || []), event])
+  }
+  return Array.from(groups.entries()).map(([key, groupEvents], index) => {
+    const latest = groupEvents[groupEvents.length - 1]
+    return {
+      key,
+      title: latest.subTaskTitle || `子任务 ${index + 1}`,
+      events: groupEvents,
+      latest,
+    }
+  })
+}
+
+function formatSubAgentPanelTitle(groups: SubAgentProgressGroup[], latest: AgentProgressEvent) {
+  if (groups.length <= 1) return subAgentPanelTitle(latest)
+  const finished = groups.filter((group) => group.latest.stage === 'run_finished').length
+  const failed = groups.filter((group) => group.latest.stage === 'error').length
+  if (finished + failed >= groups.length) {
+    return failed > 0 ? `子助手完成 ${finished}/${groups.length}` : `子助手已完成 ${groups.length}/${groups.length}`
+  }
+  return `${groups.length} 个子任务并行分析中`
+}
+
+function SubAgentProgressPanel({ events, tasks }: { events: AgentProgressEvent[]; tasks?: string[] }) {
   if (events.length === 0) return null
   const latestKey = subAgentProgressKey(events[events.length - 1])
   const latest = events[events.length - 1]
   const toolCount = new Set(events.map((event) => event.toolName).filter(Boolean)).size
+  const groups = groupSubAgentProgress(events)
+  const finishedGroups = groups.filter((group) => group.latest.stage === 'run_finished').length
+  const failedGroups = groups.filter((group) => group.latest.stage === 'error').length
 
   return (
     <section
@@ -507,58 +571,86 @@ function SubAgentProgressPanel({ events, task }: { events: AgentProgressEvent[];
     >
       <div className="mb-2 flex min-w-0 items-center gap-2 font-medium text-foreground">
         <Sparkles className="size-3.5 shrink-0" />
-        <span className="shrink-0">{subAgentPanelTitle(latest)}</span>
+        <span className="shrink-0">{formatSubAgentPanelTitle(groups, latest)}</span>
         <span className="min-w-0 truncate text-muted-foreground font-normal">
           {formatSubAgentProgressTitle(latest)}
         </span>
       </div>
-      {task && (
+      {tasks && tasks.length > 0 && (
         <div className="mb-2 rounded-(--agent-radius,12px) bg-muted/50 px-2 py-1.5 text-muted-foreground">
           <div className="mb-0.5 text-[11px] text-foreground">委托任务</div>
-          <div className="line-clamp-3 whitespace-pre-wrap wrap-break-word">{task}</div>
+          {tasks.length === 1 ? (
+            <div className="line-clamp-3 whitespace-pre-wrap wrap-break-word">{tasks[0]}</div>
+          ) : (
+            <ol className="list-inside list-decimal space-y-0.5">
+              {tasks.slice(0, 4).map((task, index) => (
+                <li className="line-clamp-2 whitespace-pre-wrap wrap-break-word" key={`${index}-${task}`}>
+                  {task}
+                </li>
+              ))}
+            </ol>
+          )}
         </div>
       )}
       <div className="mb-2 flex flex-wrap gap-1">
         <span className="rounded-full bg-muted/60 px-2 py-0.5 text-muted-foreground">{events.length} 条进度</span>
+        {groups.length > 1 && <span className="rounded-full bg-muted/60 px-2 py-0.5 text-muted-foreground">完成 {finishedGroups}/{groups.length}</span>}
+        {failedGroups > 0 && <span className="rounded-full bg-destructive/10 px-2 py-0.5 text-destructive">失败 {failedGroups}</span>}
         {toolCount > 0 && <span className="rounded-full bg-muted/60 px-2 py-0.5 text-muted-foreground">{toolCount} 个工具</span>}
         <span className="rounded-full bg-muted/60 px-2 py-0.5 text-muted-foreground">最近 {formatProgressTime(latest.at)}</span>
       </div>
-      <div className="space-y-1">
-        {events.map((progress) => {
-          const Icon = subAgentProgressIcon(progress)
-          const itemKey = subAgentProgressKey(progress)
-          const meta = formatSubAgentProgressMeta(progress)
-          const active = itemKey === latestKey
-            && progress.stage !== 'tool_finished'
-            && progress.stage !== 'run_finished'
-            && progress.stage !== 'error'
+      <div className="space-y-2">
+        {groups.map((group) => {
+          const groupLatestKey = subAgentProgressKey(group.latest)
           return (
-            <div
-              className="flex min-w-0 items-start gap-2 rounded-(--agent-radius,12px) px-1.5 py-1 text-muted-foreground"
-              key={itemKey}
-            >
-              <span className="relative mt-0.5 inline-flex size-4 shrink-0 items-center justify-center">
-                <Icon className="size-3.5" />
-                <span className={`absolute -right-0.5 -top-0.5 size-1.5 rounded-full ${subAgentProgressDotClass(progress)} ${active ? 'animate-pulse' : ''}`} />
-              </span>
-              <div className="min-w-0 flex-1">
-                <div className="flex min-w-0 items-center gap-2">
-                  <span className="truncate text-foreground">{formatSubAgentProgressTitle(progress)}</span>
-                  <span className="shrink-0 text-[10px] text-muted-foreground">{formatProgressTime(progress.at)}</span>
+            <div className="rounded-(--agent-radius,12px) bg-muted/30 px-2 py-1.5" key={group.key}>
+              {groups.length > 1 && (
+                <div className="mb-1 flex min-w-0 items-center gap-2 font-medium text-foreground">
+                  <span className={`size-1.5 shrink-0 rounded-full ${subAgentProgressDotClass(group.latest)}`} />
+                  <span className="min-w-0 flex-1 truncate">{group.title}</span>
+                  <span className="shrink-0 text-[10px] text-muted-foreground">{formatSubAgentStage(group.latest)}</span>
                 </div>
-                {meta.length > 0 && (
-                  <div className="mt-0.5 flex min-w-0 flex-wrap gap-1">
-                    {meta.map((item) => (
-                      <span
-                        className="max-w-full truncate rounded-(--agent-radius,12px) bg-muted/60 px-1.5 py-0.5"
-                        key={item}
-                        title={item}
-                      >
-                        {item}
+              )}
+              <div className="space-y-1">
+                {group.events.slice(groups.length > 1 ? -4 : -SUB_AGENT_PROGRESS_LIMIT).map((progress) => {
+                  const Icon = subAgentProgressIcon(progress)
+                  const itemKey = subAgentProgressKey(progress)
+                  const meta = formatSubAgentProgressMeta(progress)
+                  const active = (itemKey === latestKey || itemKey === groupLatestKey)
+                    && progress.stage !== 'tool_finished'
+                    && progress.stage !== 'run_finished'
+                    && progress.stage !== 'error'
+                  return (
+                    <div
+                      className="flex min-w-0 items-start gap-2 rounded-(--agent-radius,12px) px-1 py-0.5 text-muted-foreground"
+                      key={itemKey}
+                    >
+                      <span className="relative mt-0.5 inline-flex size-4 shrink-0 items-center justify-center">
+                        <Icon className="size-3.5" />
+                        <span className={`absolute -right-0.5 -top-0.5 size-1.5 rounded-full ${subAgentProgressDotClass(progress)} ${active ? 'animate-pulse' : ''}`} />
                       </span>
-                    ))}
-                  </div>
-                )}
+                      <div className="min-w-0 flex-1">
+                        <div className="flex min-w-0 items-center gap-2">
+                          <span className="truncate text-foreground">{formatSubAgentProgressTitle(progress)}</span>
+                          <span className="shrink-0 text-[10px] text-muted-foreground">{formatProgressTime(progress.at)}</span>
+                        </div>
+                        {meta.length > 0 && (
+                          <div className="mt-0.5 flex min-w-0 flex-wrap gap-1">
+                            {meta.map((item) => (
+                              <span
+                                className="max-w-full truncate rounded-(--agent-radius,12px) bg-muted/60 px-1.5 py-0.5"
+                                key={item}
+                                title={item}
+                              >
+                                {item}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )
+                })}
               </div>
             </div>
           )
@@ -1167,6 +1259,9 @@ function progressSignature(events: AgentProgressEvent[]): string {
     detail: event.detail,
     toolName: event.toolName,
     toolCallId: event.toolCallId,
+    parentToolCallId: event.parentToolCallId,
+    subTaskId: event.subTaskId,
+    subTaskTitle: event.subTaskTitle,
     depth: event.depth,
     at: event.at,
   })))
@@ -1602,6 +1697,8 @@ export default function AgentPage() {
     }, ...list]
   }, [currentModelId, currentProviderId, presets, modelInfoByKey])
   const chefs = useMemo(() => [...new Set(models.map((model) => model.chef))], [models])
+  const disabledModelKeys = useMemo(() => models.filter((model) => model.disabled).map((model) => model.id), [models])
+  const selectedModelKeys = useMemo(() => new Set([selectedPresetId]), [selectedPresetId])
   const selectedModelData = models.find((model) => model.id === selectedPresetId)
   const selectedModelSupportsTools = selectedModelData?.modelDetail
     ? selectedModelData.modelDetail.capabilities.toolCall
@@ -1725,7 +1822,8 @@ export default function AgentPage() {
     ),
     [handleAgentProgress]
   )
-  const { messages, sendMessage, setMessages, status, stop } = useChat({ transport })
+  // 流式 chunk 合并到每 50ms 更新一次 UI，避免 token 级高频重渲染拖卡滚动
+  const { messages, sendMessage, setMessages, status, stop } = useChat({ transport, experimental_throttle: 50 })
   const [modelOpen, setModelOpen] = useState(false)
   const busy = status === 'submitted' || status === 'streaming'
   const latestUserMessageId = useMemo(() => {
@@ -1770,6 +1868,23 @@ export default function AgentPage() {
   const titleRequestSeqRef = useRef(0)
   const [recordsOpen, setRecordsOpen] = useState(false)
   const [conversationRecords, setConversationRecords] = useState<AgentConversationRecord[]>([])
+  const [recordPendingDelete, setRecordPendingDelete] = useState<AgentConversationRecord | null>(null)
+  const [recordDeleting, setRecordDeleting] = useState(false)
+  // Agent 运行状态 → 桌宠动作：跑→run，报错→failed，收尾→done(挥手 2.6s)。
+  const petAgentState = busy ? 'running' : agentNotice ? 'failed' : 'idle'
+  const petPrevBusyRef = useRef(false)
+  useEffect(() => {
+    if (petAgentState === 'idle' && petPrevBusyRef.current) {
+      window.electronAPI.pet?.setAgentState('done')
+      const timer = window.setTimeout(() => {
+        window.electronAPI.pet?.setAgentState('idle')
+      }, 2600)
+      petPrevBusyRef.current = false
+      return () => window.clearTimeout(timer)
+    }
+    petPrevBusyRef.current = petAgentState === 'running'
+    window.electronAPI.pet?.setAgentState(petAgentState)
+  }, [petAgentState])
 
   const appendMentionTargets = useCallback((items: MentionTarget[]) => {
     if (items.length === 0) return
@@ -1940,9 +2055,13 @@ export default function AgentPage() {
     })
   }, [busy, setMessages, stop])
 
-  const handleDeleteRecord = useCallback((record: AgentConversationRecord) => {
-    void window.electronAPI.agent.deleteConversation(record.id).then((result) => {
-      if (!result.success) return
+  const handleDeleteRecord = useCallback(async (record: AgentConversationRecord) => {
+    try {
+      const result = await window.electronAPI.agent.deleteConversation(record.id)
+      if (!result.success) {
+        setAgentNotice(result.error || '删除对话失败')
+        return false
+      }
       setConversationRecords((prev) => prev.filter((item) => item.id !== record.id))
       if (conversationIdRef.current === record.id) {
         setMessages([])
@@ -1957,8 +2076,21 @@ export default function AgentPage() {
         setAgentRunPending(false)
         setSubAgentProgress([])
       }
-    })
+      return true
+    } catch (error) {
+      setAgentNotice(error instanceof Error ? error.message : '删除对话失败')
+      return false
+    }
   }, [setMessages])
+
+  const confirmDeleteRecord = useCallback(async () => {
+    if (!recordPendingDelete) return
+    const target = recordPendingDelete
+    setRecordDeleting(true)
+    const deleted = await handleDeleteRecord(target)
+    setRecordDeleting(false)
+    if (deleted) setRecordPendingDelete(null)
+  }, [handleDeleteRecord, recordPendingDelete])
 
   const beginTitleEdit = useCallback(() => {
     titleRequestSeqRef.current += 1
@@ -2289,62 +2421,103 @@ export default function AgentPage() {
             </button>
           )}
         </div>
-        <div className="relative flex items-center gap-1">
-          <Button
-            aria-label="对话记录"
-            className="size-8 rounded-(--agent-radius,12px) p-0"
-            onClick={() => setRecordsOpen((open) => !open)}
-            title="对话记录"
-            type="button"
-            variant="ghost"
-          >
-            <History className="size-4" />
-          </Button>
-          <Button
-            aria-label="新建对话"
-            className="size-8 rounded-(--agent-radius,12px) p-0"
-            onClick={handleNewConversation}
-            title="新建对话"
-            type="button"
-            variant="ghost"
-          >
-            <SquarePen className="size-4" />
-          </Button>
-          {recordsOpen && (
-            <div className="absolute right-0 top-10 z-50 w-72 overflow-hidden rounded-(--agent-radius,12px) border border-border bg-popover p-1 shadow-lg">
-              {conversationRecords.length > 0 ? (
-                conversationRecords.map((record) => (
-                  <div className="flex items-center gap-1 rounded-(--agent-radius,12px) hover:bg-accent" key={record.id}>
-                    <button
-                      className="flex min-w-0 flex-1 flex-col px-2 py-1.5 text-left"
-                      onClick={() => handleOpenRecord(record)}
-                      type="button"
-                    >
-                      <span className="w-full truncate text-sm text-foreground">{record.title}</span>
-                      <span className="text-muted-foreground text-xs">
-                        {new Date(record.updatedAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
-                      </span>
-                    </button>
-                    <button
-                      aria-label={`删除 ${record.title}`}
-                      className="mr-1 inline-flex size-7 shrink-0 items-center justify-center rounded-(--agent-radius,12px) text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-                      onClick={() => handleDeleteRecord(record)}
-                      type="button"
-                    >
-                      <Trash2 className="size-3.5" />
-                    </button>
-                  </div>
-                ))
-              ) : (
-                <div className="px-2 py-3 text-center text-muted-foreground text-xs">暂无对话记录</div>
-              )}
-            </div>
-          )}
+        <div className="relative">
+          <Toolbar aria-label="对话操作" className="p-0">
+            <ButtonGroup size="sm" variant="tertiary">
+              <Dropdown isOpen={recordsOpen} onOpenChange={setRecordsOpen}>
+                <HeroButton
+                  aria-label="对话记录"
+                  className="size-8 p-0"
+                  isIconOnly
+                  size="sm"
+                  variant="tertiary"
+                >
+                  <History className="size-4" />
+                </HeroButton>
+                <Dropdown.Popover className="w-[min(28rem,calc(100vw-2rem))]" placement="bottom end">
+                  <Dropdown.Menu
+                    disabledKeys={conversationRecords.length > 0 ? undefined : ['empty-conversation-records']}
+                    selectedKeys={conversationId ? [conversationId] : []}
+                    selectionMode="single"
+                    className="max-h-[min(70vh,32rem)] overflow-y-auto"
+                    onAction={(key) => {
+                      const record = conversationRecords.find((item) => String(item.id) === String(key))
+                      if (record) handleOpenRecord(record)
+                    }}
+                  >
+                    {conversationRecords.length > 0 ? conversationRecords.map((record) => {
+                      return (
+                        <Dropdown.Item
+                          className="min-h-14 gap-3 py-2.5"
+                          id={record.id}
+                          key={record.id}
+                          textValue={record.title}
+                        >
+                          <Dropdown.ItemIndicator />
+                          <Clock3 className="size-4 shrink-0 text-muted" />
+                          <span className="min-w-0 flex-1">
+                            <Label className="block truncate font-medium text-sm">{record.title}</Label>
+                            <span className="block truncate text-muted-foreground text-xs">
+                              {new Date(record.updatedAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                            </span>
+                          </span>
+                          <span
+                            className="ms-auto flex shrink-0"
+                            onClick={(event) => event.stopPropagation()}
+                            onMouseDown={(event) => event.stopPropagation()}
+                            onPointerDown={(event) => event.stopPropagation()}
+                          >
+                            <HeroButton
+                              aria-label={`删除 ${record.title}`}
+                              className="size-8 p-0 text-muted-foreground hover:text-danger"
+                              isIconOnly
+                              size="sm"
+                              variant="ghost"
+                              onPress={() => {
+                                setRecordPendingDelete(record)
+                                setRecordsOpen(false)
+                              }}
+                            >
+                              <Trash2 className="size-4" />
+                            </HeroButton>
+                          </span>
+                        </Dropdown.Item>
+                      )
+                    }) : (
+                      <Dropdown.Item
+                        className="min-h-20 justify-center py-6 text-center text-muted-foreground text-sm"
+                        id="empty-conversation-records"
+                        key="empty-conversation-records"
+                        textValue="暂无对话记录"
+                      >
+                        暂无对话记录
+                      </Dropdown.Item>
+                    )}
+                  </Dropdown.Menu>
+                </Dropdown.Popover>
+              </Dropdown>
+              <HeroButton
+                aria-label="新建对话"
+                className="size-8 p-0"
+                isIconOnly
+                onPress={handleNewConversation}
+              >
+                <ButtonGroup.Separator />
+                <SquarePen className="size-4" />
+              </HeroButton>
+            </ButtonGroup>
+          </Toolbar>
         </div>
       </div>
       <Conversation className="min-h-0 flex-1">
         <ConversationAutoScroll enabled={shouldAnchorLatestUser} trigger={latestUserMessageId} />
-        <ConversationContent className="mx-auto w-full min-w-80 max-w-[82%] pt-4 pb-12">
+        <ConversationContent
+          className={
+            messages.length === 0
+              ? 'mx-auto h-full w-full min-w-80 max-w-[82%] pt-4 pb-12'
+              : 'mx-auto w-full min-w-80 max-w-[82%] pt-4 pb-12'
+          }
+        >
           {messages.length === 0 ? (
             <ConversationEmptyState
               title="开始查询聊天记录"
@@ -2404,7 +2577,7 @@ export default function AgentPage() {
                           const elapsedMs = toolElapsedByKey[toolPartProgressKey(part, toolName)]
                           const label = done && elapsedMs ? `${toolLabel} · ${formatElapsed(elapsedMs)}` : toolLabel
                           const badges = collectToolBadges(part.input)
-                          const delegateTask = toolName === 'delegate_analysis' ? getDelegateTask(part) : undefined
+                          const delegateTasks = toolName === 'delegate_analysis' ? getDelegateTasks(part) : undefined
                           if (part.state === 'output-available') {
                             for (const badge of collectRetrievalBadges(toolName, part.output)) pushBadge(badges, badge)
                             collectToolBadges(part.output, badges)
@@ -2429,7 +2602,7 @@ export default function AgentPage() {
                                 <p className="text-destructive text-xs">{part.errorText}</p>
                               )}
                               {toolName === 'delegate_analysis' && subAgentEventsForMessage.length > 0 && (
-                                <SubAgentProgressPanel events={subAgentEventsForMessage} task={delegateTask} />
+                                <SubAgentProgressPanel events={subAgentEventsForMessage} tasks={delegateTasks} />
                               )}
                             </ChainOfThoughtStep>
                           )
@@ -2455,7 +2628,7 @@ export default function AgentPage() {
                         // 计划消息的正文已经在 PlanCard 里展示，这里不再重复渲染。
                         if (isPlanMessage) return null
                         const displayText = userDisplay?.textByPartIndex.get(index) ?? part.text
-                        if (!displayText) return null
+                        if (!displayText && !assistantTextStreaming) return null
                         return (
                           <MessageResponse isStreaming={assistantTextStreaming} key={`text-${index}`}>
                             {displayText}
@@ -2535,7 +2708,7 @@ export default function AgentPage() {
         <PromptInputProvider>
           <PromptInput
             accept="image/*,.txt,.md,.json,.csv"
-            className="mx-auto mb-2 w-full min-w-80 max-w-[82%] **:data-[slot=input-group]:rounded-(--agent-radius,12px) **:data-[slot=input-group]:border-border **:data-[slot=input-group]:bg-surface **:data-[slot=input-group]:shadow-xs"
+            className="agent-prompt-input mx-auto mb-2 w-full min-w-80 max-w-[82%] **:data-[slot=input-group]:rounded-(--agent-radius,12px) **:data-[slot=input-group]:border-border **:data-[slot=input-group]:bg-surface **:data-[slot=input-group]:shadow-xs"
             maxFiles={6}
             maxFileSize={8 * 1024 * 1024}
             multiple
@@ -2663,38 +2836,36 @@ export default function AgentPage() {
                 </ButtonGroup>
 
                 <ButtonGroup size="sm" variant="tertiary">
-                  <ModelSelector onOpenChange={setModelOpen} open={modelOpen}>
-                    <ModelSelectorTrigger asChild>
-                      <HeroButton className="max-w-48" size="sm" variant="tertiary">
-                        {selectedModelData?.chefSlug && (
-                          <AIProviderLogo providerId={selectedModelData.chefSlug} alt={selectedModelData.chef} className="shrink-0" size={18} />
-                        )}
-                        {selectedModelData?.name && (
-                          <ModelSelectorName>{selectedModelData.name}</ModelSelectorName>
-                        )}
-                      </HeroButton>
-                    </ModelSelectorTrigger>
-                    <ModelSelectorContent>
-                      <ModelSelectorInput placeholder="搜索模型..." />
-                      <ModelSelectorList>
-                        <ModelSelectorEmpty>没有匹配的模型</ModelSelectorEmpty>
+                  <Dropdown isOpen={modelOpen} onOpenChange={setModelOpen}>
+                    <HeroButton aria-label="选择模型" className="max-w-56" size="sm" variant="tertiary">
+                      {selectedModelData?.chefSlug && (
+                        <AIProviderLogo providerId={selectedModelData.chefSlug} alt={selectedModelData.chef} className="shrink-0" size={18} />
+                      )}
+                      {selectedModelData?.name && (
+                        <span className="min-w-0 flex-1 truncate text-left">{selectedModelData.name}</span>
+                      )}
+                      <ChevronDown className="size-3.5 shrink-0" />
+                    </HeroButton>
+                    <Dropdown.Popover className="max-h-96 min-w-72 overflow-y-auto" placement="top start">
+                      <Dropdown.Menu
+                        disabledKeys={disabledModelKeys}
+                        selectedKeys={selectedModelKeys}
+                        selectionMode="single"
+                        onAction={(key) => handleModelSelect(String(key))}
+                      >
                         {chefs.map((chef) => (
-                          <ModelSelectorGroup heading={chef} key={chef}>
+                          <Dropdown.Section key={chef}>
+                            <Header>{chef}</Header>
                             {models
                               .filter((model) => model.chef === chef)
                               .map((model) => (
-                                <ModelItem
-                                  key={model.id}
-                                  model={model}
-                                  onSelect={handleModelSelect}
-                                  selectedModel={selectedPresetId}
-                                />
+                                <ModelItem key={model.id} model={model} />
                               ))}
-                          </ModelSelectorGroup>
+                          </Dropdown.Section>
                         ))}
-                      </ModelSelectorList>
-                    </ModelSelectorContent>
-                  </ModelSelector>
+                      </Dropdown.Menu>
+                    </Dropdown.Popover>
+                  </Dropdown>
                 </ButtonGroup>
 
               </PromptInputTools>
@@ -2721,6 +2892,41 @@ export default function AgentPage() {
           onClose={() => setUsageDetailsModal(null)}
         />
       )}
+      <AlertDialog.Backdrop
+        isOpen={recordPendingDelete !== null}
+        onOpenChange={(open) => {
+          if (!open && !recordDeleting) setRecordPendingDelete(null)
+        }}
+      >
+        <AlertDialog.Container>
+          <AlertDialog.Dialog className="sm:max-w-100">
+            <AlertDialog.Header>
+              <AlertDialog.Icon status="danger">
+                <Trash2 className="size-5" />
+              </AlertDialog.Icon>
+              <AlertDialog.Heading>删除这条对话记录？</AlertDialog.Heading>
+            </AlertDialog.Header>
+            <AlertDialog.Body>
+              <p>删除后无法恢复。</p>
+              {recordPendingDelete && (
+                <p className="mt-2 truncate font-medium text-foreground">{recordPendingDelete.title}</p>
+              )}
+            </AlertDialog.Body>
+            <AlertDialog.Footer>
+              <HeroButton
+                isDisabled={recordDeleting}
+                variant="tertiary"
+                onPress={() => setRecordPendingDelete(null)}
+              >
+                取消
+              </HeroButton>
+              <HeroButton isDisabled={recordDeleting} variant="danger" onPress={confirmDeleteRecord}>
+                {recordDeleting ? '删除中...' : '删除'}
+              </HeroButton>
+            </AlertDialog.Footer>
+          </AlertDialog.Dialog>
+        </AlertDialog.Container>
+      </AlertDialog.Backdrop>
     </Surface>
   )
 }

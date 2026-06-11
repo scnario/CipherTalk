@@ -41,6 +41,11 @@ export interface WindowManager {
   completeWelcome(): boolean
   isChatWindowOpen(): boolean
   closeChatWindow(): boolean
+  openPetWindow(): BrowserWindow
+  closePetWindow(): void
+  isPetWindowOpen(): boolean
+  showPetContextMenu(): void
+  setPetBubbleExpanded(expanded: boolean): void
 }
 
 export interface MainProcessContext {
