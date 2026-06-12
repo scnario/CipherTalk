@@ -28,6 +28,40 @@ export interface WebSearchConfig {
   maxResults: number
 }
 
+export interface TtsConfig {
+  enabled: boolean
+  protocol: 'openai-speech' | 'openai-chat' | 'custom'
+  apiKey: string
+  baseURL: string
+  model: string
+  voice: string
+  instructions: string
+  speed: number
+}
+
+export interface TtsSpeakResult {
+  success: boolean
+  audioBase64?: string
+  mimeType?: string
+  cached?: boolean
+  error?: string
+  errorCode?: 'NOT_CONFIGURED' | 'SYNTHESIS_FAILED'
+}
+
+export interface TtsSpeakOptions {
+  config?: Partial<TtsConfig>
+}
+
+export interface ImageGenConfig {
+  enabled: boolean
+  protocol: 'openai-compatible' | 'openai' | 'google'
+  apiKey: string
+  baseURL: string
+  model: string
+  size: string
+  timeoutMs: number
+}
+
 export interface EmbeddingBuildProgress {
   sessionId: string
   stage: 'loading' | 'chunking' | 'embedding' | 'done'
@@ -148,6 +182,54 @@ export interface AgentMemoryItem {
   updatedAt: number
 }
 
+// 克隆好友（数字分身）：画像卡 + few-shot + 风格统计（与 electron/services/agent/persona/personaTypes.ts 对应）
+export interface PersonaCardInfo {
+  tone: string
+  personalityTraits: string[]
+  catchphrases: string[]
+  punctuationStyle: string
+  addressing: string
+  topics: string[]
+  ttsInstructions: string
+}
+
+export interface PersonaProfileInfo {
+  facts: string[]
+  relationship: string
+  reactionPatterns: string[]
+  boundaries: string[]
+  sharedEvents: string[]
+}
+
+export interface PersonaRecordInfo {
+  id: number
+  accountId: string
+  sessionId: string
+  displayName: string
+  card: PersonaCardInfo
+  fewShots: Array<{ user: string; replies: string[] }>
+  stats: {
+    sourceMessageCount: number
+    friendMessageCount: number
+    avgFriendMsgChars: number
+    avgFriendBurst: number
+  }
+  profile: PersonaProfileInfo | null
+  corpusUntil: number
+  modelProvider: string
+  modelId: string
+  createdAt: number
+  updatedAt: number
+}
+
+export interface PersonaBuildProgressInfo {
+  sessionId: string
+  stage: 'indexing' | 'corpus' | 'extracting' | 'saving' | 'done' | 'error'
+  title: string
+  percent: number
+  detail?: string
+}
+
 export interface ElectronAPI {
   window: {
     minimize: () => void
@@ -157,6 +239,7 @@ export interface ElectronAPI {
     onSplashFadeOut?: (callback: () => void) => () => void
     openChatWindow: () => Promise<boolean>
     openMomentsWindow: (filterUsername?: string) => Promise<boolean>
+    openPersonaChatWindow: (sessionId: string) => Promise<boolean>
     onMomentsFilterUser: (callback: (username: string) => void) => () => void
     openAgreementWindow: () => Promise<boolean>
     openPurchaseWindow: () => Promise<boolean>
@@ -620,7 +703,7 @@ export interface ElectronAPI {
   chat: {
     connect: () => Promise<{ success: boolean; error?: string }>
     getSessions: (offset?: number, limit?: number) => Promise<{ success: boolean; sessions?: ChatSession[]; hasMore?: boolean; error?: string }>
-    getMentionTargets: (offset?: number, limit?: number) => Promise<{ success: boolean; sessions?: ChatSession[]; hasMore?: boolean; error?: string }>
+    getMentionTargets: (offset?: number, limit?: number, keyword?: string) => Promise<{ success: boolean; sessions?: ChatSession[]; hasMore?: boolean; error?: string }>
     getContacts: () => Promise<{ success: boolean; contacts?: ContactInfo[]; error?: string }>
     getMessages: (sessionId: string, offset?: number, limit?: number) => Promise<{
       success: boolean;
@@ -1041,9 +1124,23 @@ export interface ElectronAPI {
     loadConversation: (id: number) => Promise<{ success: boolean; conversation?: unknown; error?: string }>
     createConversation: (payload: unknown) => Promise<{ success: boolean; conversation?: unknown; error?: string }>
     deleteConversation: (id: number) => Promise<{ success: boolean; error?: string }>
+    deleteConversationsByScope: (scope: unknown) => Promise<{ success: boolean; deleted?: number; error?: string }>
     renameConversation: (id: number, title: string) => Promise<{ success: boolean; conversation?: unknown; error?: string }>
     saveConversationMessages: (payload: unknown) => Promise<{ success: boolean; conversation?: unknown; error?: string }>
     getLastConversation: (scope?: unknown) => Promise<{ success: boolean; conversation?: unknown; error?: string }>
+  }
+  persona: {
+    get: (sessionId: string) => Promise<{ success: boolean; persona?: PersonaRecordInfo | null; error?: string }>
+    list: () => Promise<{ success: boolean; personas?: PersonaRecordInfo[]; error?: string }>
+    build: (payload: { sessionId: string; displayName?: string }) => Promise<{ success: boolean; persona?: PersonaRecordInfo; error?: string }>
+    delete: (sessionId: string) => Promise<{ success: boolean; error?: string }>
+    refreshIfStale: (sessionId: string) => Promise<{ success: boolean; refreshed?: boolean; persona?: PersonaRecordInfo | null; error?: string }>
+    reflect: (payload: { sessionId: string; conversationId: number }) => Promise<{ success: boolean; reflected?: boolean; error?: string }>
+    onBuildProgress: (callback: (progress: PersonaBuildProgressInfo) => void) => () => void
+    chat: (runId: string, sessionId: string, messages: unknown[]) => Promise<{ success: boolean; error?: string }>
+    abort: (runId: string) => Promise<{ success: boolean }>
+    onChunk: (runId: string, callback: (chunk: unknown) => void) => () => void
+    onProgress: (runId: string, callback: (progress: unknown) => void) => () => void
   }
   memory: {
     list: (opts?: { sourceType?: 'profile' | 'fact' | 'relationship'; sourceTypes?: Array<'profile' | 'fact' | 'relationship'>; sessionId?: string; tags?: string[]; withoutTags?: string[]; minConfidence?: number; limit?: number }) => Promise<{ success: boolean; items?: AgentMemoryItem[]; stats?: { itemCount: number }; error?: string }>
@@ -1072,6 +1169,17 @@ export interface ElectronAPI {
     getConfig: () => Promise<{ success: boolean; config?: WebSearchConfig; error?: string }>
     setConfig: (patch: Partial<WebSearchConfig>) => Promise<{ success: boolean; config?: WebSearchConfig; error?: string }>
     test: (cfg: WebSearchConfig) => Promise<{ success: boolean; resultCount?: number; error?: string }>
+  }
+  tts: {
+    getConfig: () => Promise<{ success: boolean; config?: TtsConfig; available?: boolean; error?: string }>
+    setConfig: (patch: Partial<TtsConfig>) => Promise<{ success: boolean; config?: TtsConfig; error?: string }>
+    test: (cfg: Partial<TtsConfig>) => Promise<TtsSpeakResult>
+    speak: (text: string, options?: TtsSpeakOptions) => Promise<TtsSpeakResult>
+  }
+  imageGen: {
+    getConfig: () => Promise<{ success: boolean; config?: ImageGenConfig; available?: boolean; error?: string }>
+    setConfig: (patch: Partial<ImageGenConfig>) => Promise<{ success: boolean; config?: ImageGenConfig; error?: string }>
+    test: (cfg: Partial<ImageGenConfig>) => Promise<{ success: boolean; filePath?: string; mimeType?: string; error?: string }>
   }
   // AI 接入
   ai: {

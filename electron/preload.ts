@@ -133,6 +133,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('agent:createConversation', payload) as Promise<{ success: boolean; conversation?: unknown; error?: string }>,
     deleteConversation: (id: number) =>
       ipcRenderer.invoke('agent:deleteConversation', id) as Promise<{ success: boolean; error?: string }>,
+    deleteConversationsByScope: (scope: unknown) =>
+      ipcRenderer.invoke('agent:deleteConversationsByScope', scope) as Promise<{ success: boolean; deleted?: number; error?: string }>,
     renameConversation: (id: number, title: string) =>
       ipcRenderer.invoke('agent:renameConversation', id, title) as Promise<{ success: boolean; conversation?: unknown; error?: string }>,
     saveConversationMessages: (payload: unknown) =>
@@ -152,6 +154,44 @@ contextBridge.exposeInMainWorld('electronAPI', {
       }
       ipcRenderer.on('agent:progress', listener)
       return () => ipcRenderer.removeListener('agent:progress', listener)
+    },
+  },
+
+  // 克隆好友（数字分身画像；构建进度经 persona:buildProgress 推回）
+  persona: {
+    get: (sessionId: string) =>
+      ipcRenderer.invoke('persona:get', sessionId) as Promise<{ success: boolean; persona?: unknown | null; error?: string }>,
+    list: () =>
+      ipcRenderer.invoke('persona:list') as Promise<{ success: boolean; personas?: unknown[]; error?: string }>,
+    build: (payload: { sessionId: string; displayName?: string }) =>
+      ipcRenderer.invoke('persona:build', payload) as Promise<{ success: boolean; persona?: unknown; error?: string }>,
+    delete: (sessionId: string) =>
+      ipcRenderer.invoke('persona:delete', sessionId) as Promise<{ success: boolean; error?: string }>,
+    refreshIfStale: (sessionId: string) =>
+      ipcRenderer.invoke('persona:refreshIfStale', { sessionId }) as Promise<{ success: boolean; refreshed?: boolean; persona?: unknown | null; error?: string }>,
+    reflect: (payload: { sessionId: string; conversationId: number }) =>
+      ipcRenderer.invoke('persona:reflect', payload) as Promise<{ success: boolean; reflected?: boolean; error?: string }>,
+    onBuildProgress: (callback: (progress: unknown) => void): (() => void) => {
+      const listener = (_e: unknown, progress: unknown) => callback(progress)
+      ipcRenderer.on('persona:buildProgress', listener)
+      return () => ipcRenderer.removeListener('persona:buildProgress', listener)
+    },
+    chat: (runId: string, sessionId: string, messages: unknown[]) =>
+      ipcRenderer.invoke('persona:chat', { runId, sessionId, messages }) as Promise<{ success: boolean; error?: string }>,
+    abort: (runId: string) => ipcRenderer.invoke('persona:abort', runId) as Promise<{ success: boolean }>,
+    onChunk: (runId: string, callback: (chunk: unknown) => void): (() => void) => {
+      const listener = (_e: unknown, data: { runId: string; chunk: unknown }) => {
+        if (data?.runId === runId) callback(data.chunk)
+      }
+      ipcRenderer.on('persona:chunk', listener)
+      return () => ipcRenderer.removeListener('persona:chunk', listener)
+    },
+    onProgress: (runId: string, callback: (progress: unknown) => void): (() => void) => {
+      const listener = (_e: unknown, data: { runId: string; progress: unknown }) => {
+        if (data?.runId === runId) callback(data.progress)
+      }
+      ipcRenderer.on('persona:progress', listener)
+      return () => ipcRenderer.removeListener('persona:progress', listener)
     },
   },
 
@@ -212,6 +252,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getConfig: () => ipcRenderer.invoke('webSearch:getConfig') as Promise<{ success: boolean; config?: unknown; error?: string }>,
     setConfig: (patch: unknown) => ipcRenderer.invoke('webSearch:setConfig', patch) as Promise<{ success: boolean; config?: unknown; error?: string }>,
     test: (cfg: unknown) => ipcRenderer.invoke('webSearch:test', cfg) as Promise<{ success: boolean; resultCount?: number; error?: string }>,
+  },
+
+  // 文字转语音 —— 朗读 AI 回复/微信消息/角色语音回复
+  tts: {
+    getConfig: () => ipcRenderer.invoke('tts:getConfig') as Promise<{ success: boolean; config?: unknown; available?: boolean; error?: string }>,
+    setConfig: (patch: unknown) => ipcRenderer.invoke('tts:setConfig', patch) as Promise<{ success: boolean; config?: unknown; error?: string }>,
+    test: (cfg: unknown) => ipcRenderer.invoke('tts:test', cfg) as Promise<{ success: boolean; audioBase64?: string; mimeType?: string; cached?: boolean; error?: string; errorCode?: string }>,
+    speak: (text: string, options?: unknown) => ipcRenderer.invoke('tts:speak', text, options) as Promise<{ success: boolean; audioBase64?: string; mimeType?: string; cached?: boolean; error?: string; errorCode?: string }>,
+  },
+
+  // AI 作图 —— AI 助手 generate_image 工具
+  imageGen: {
+    getConfig: () => ipcRenderer.invoke('imageGen:getConfig') as Promise<{ success: boolean; config?: unknown; available?: boolean; error?: string }>,
+    setConfig: (patch: unknown) => ipcRenderer.invoke('imageGen:setConfig', patch) as Promise<{ success: boolean; config?: unknown; error?: string }>,
+    test: (cfg: unknown) => ipcRenderer.invoke('imageGen:test', cfg) as Promise<{ success: boolean; filePath?: string; mimeType?: string; error?: string }>,
   },
 
   // 数据库操作
@@ -295,6 +350,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     close: () => ipcRenderer.send('window:close'),
     openChatWindow: () => ipcRenderer.invoke('window:openChatWindow'),
     openMomentsWindow: (filterUsername?: string) => ipcRenderer.invoke('window:openMomentsWindow', filterUsername),
+    openPersonaChatWindow: (sessionId: string) => ipcRenderer.invoke('window:openPersonaChatWindow', sessionId),
     onMomentsFilterUser: (callback: (username: string) => void) => {
       ipcRenderer.on('moments:filterUser', (_, username) => callback(username))
       return () => ipcRenderer.removeAllListeners('moments:filterUser')
@@ -471,7 +527,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   chat: {
     connect: () => ipcRenderer.invoke('chat:connect'),
     getSessions: (offset?: number, limit?: number) => ipcRenderer.invoke('chat:getSessions', offset, limit),
-    getMentionTargets: (offset?: number, limit?: number) => ipcRenderer.invoke('chat:getMentionTargets', offset, limit),
+    getMentionTargets: (offset?: number, limit?: number, keyword?: string) => ipcRenderer.invoke('chat:getMentionTargets', offset, limit, keyword),
     getContacts: () => ipcRenderer.invoke('chat:getContacts'),
     getMessages: (sessionId: string, offset?: number, limit?: number) =>
       ipcRenderer.invoke('chat:getMessages', sessionId, offset, limit),

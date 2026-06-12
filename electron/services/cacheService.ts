@@ -2,6 +2,7 @@ import { join } from 'path'
 import { existsSync, rmSync, readdirSync, statSync } from 'fs'
 import { app } from 'electron'
 import { ConfigService } from './config'
+import { getUserDataPath } from './runtimePaths'
 import type { AccountProfile } from '../../src/types/account'
 
 /**
@@ -13,7 +14,7 @@ import type { AccountProfile } from '../../src/types/account'
  *
  * 目前真正生效的能力：
  * - 清理图片缓存 / 表情包缓存 / 日志
- * - 清理已移除 AI 功能生成的本地数据库
+ * - 清理 AI 功能生成的本地数据库和生成文件缓存
  * - 读取缓存体积概览（数据库项固定为 0）
  * - 账号配置清理
  */
@@ -142,6 +143,16 @@ export class CacheService {
         }
       }
 
+      for (const dirPath of this.getAIDataDirs()) {
+        if (!existsSync(dirPath)) continue
+        try {
+          rmSync(dirPath, { recursive: true, force: true })
+          deletedFiles.push(dirPath)
+        } catch (e) {
+          failedFiles.push({ path: dirPath, error: String(e) })
+        }
+      }
+
       if (failedFiles.length > 0) {
         return {
           success: false,
@@ -158,7 +169,7 @@ export class CacheService {
   }
 
   /**
-   * 清除所有缓存（图片 / 表情包 / 日志；不含数据库）
+   * 清除所有缓存（图片 / 表情包 / 日志 / AI 数据；不含微信原始数据库）
    */
   async clearAll(): Promise<{ success: boolean; error?: string }> {
     try {
@@ -343,7 +354,8 @@ export class CacheService {
       'agent_memory.db',
       'chat_search_index.db',
       'chat_vectors.db',
-      'agent_conversations.db'
+      'agent_conversations.db',
+      'tts-cache.db'
     ]
 
     return Array.from(new Set(
@@ -373,7 +385,30 @@ export class CacheService {
         }
       }
     }
+    for (const dirPath of this.getAIDataDirs()) {
+      total += this.getFolderSize(dirPath)
+    }
     return total
+  }
+
+  private getAIDataDirs(): string[] {
+    const configuredCachePath = String(this.configService.get('cachePath') || '').trim()
+    const basePaths = [
+      configuredCachePath,
+      this.getEffectiveCachePath(),
+      join(process.cwd(), 'cache')
+    ].filter(Boolean)
+
+    return Array.from(new Set(
+      [
+        ...basePaths.flatMap(basePath => [
+          join(basePath, 'tts-audio'),
+          join(basePath, 'ai-images')
+        ]),
+        // 兼容旧版本：AI 作图曾保存到 userData/ai-images。
+        join(getUserDataPath(), 'ai-images')
+      ]
+    ))
   }
 
   private async closeAIDataStores(): Promise<void> {
@@ -389,6 +424,9 @@ export class CacheService {
         .catch(() => undefined),
       import('./agent/conversationStore')
         .then(({ agentConversationStore }) => agentConversationStore.close())
+        .catch(() => undefined),
+      import('./ai/ttsService')
+        .then(({ closeTtsCache }) => closeTtsCache())
         .catch(() => undefined)
     ])
   }

@@ -51,6 +51,7 @@ import { Loader } from '@/components/ai-elements/loader'
 import { Shimmer } from '@/components/ai-elements/shimmer'
 import { IpcChatTransport, type AgentModelConfig, type AgentProgressEvent, type AgentReasoningEffort, type AgentScope } from '@/features/aiagent/transport/ipcChatTransport'
 import * as configService from '@/services/config'
+import { useTtsSpeaker } from '@/lib/ttsPlayer'
 
 const PROMPT_PRESETS = [
   { label: '最近聊了什么', text: '最近一周我和大家主要聊了什么？按主题总结，并列出关键时间。', icon: Clock3 },
@@ -234,18 +235,11 @@ function PlanCard({ text, streaming }: { text: string; streaming: boolean }) {
   )
 }
 
-function MessageChainOfThought({ active, children }: { active: boolean; children: ReactNode }) {
-  const [open, setOpen] = useState(active)
-  const prevActive = useRef(active)
-  useEffect(() => {
-    if (prevActive.current !== active) {
-      prevActive.current = active
-      setOpen(active)
-    }
-  }, [active])
+function MessageChainOfThought({ children }: { active: boolean; children: ReactNode }) {
+  const [open, setOpen] = useState(false)
   return (
     <ChainOfThought onOpenChange={setOpen} open={open}>
-      <ChainOfThoughtHeader />
+      <ChainOfThoughtHeader>执行过程</ChainOfThoughtHeader>
       <ChainOfThoughtContent>{children}</ChainOfThoughtContent>
     </ChainOfThought>
   )
@@ -261,6 +255,7 @@ const TOOL_LABELS: Record<string, string> = {
   search_moments: '搜索朋友圈',
   moments_stats: '朋友圈统计',
   web_search: '联网搜索',
+  generate_image: '生成图片',
   auto_memory: '自动记忆',
   final_review: '最终审核',
 }
@@ -399,6 +394,25 @@ function getDelegateTasks(part: unknown): string[] {
 
 const SUB_AGENT_PROGRESS_LIMIT = 48
 const AGENT_PENDING_TITLE = '正在准备请求'
+const HIDDEN_PREP_PROGRESS_TITLES = new Set([
+  AGENT_PENDING_TITLE,
+  '正在准备 Agent',
+  '正在筛选工具与技能',
+  '已选定工具与技能',
+  '正在加载长期记忆',
+  '正在召回相关记忆',
+  '正在准备工具',
+  '正在请求模型',
+  '正在交给 Agent 进程',
+])
+
+function shouldDisplayAgentProgress(progress: AgentProgressEvent) {
+  if (progress.stage === 'error') return true
+  if (progress.visible === false) return false
+  if ((progress.depth ?? 0) === 0 && progress.stage === 'run_started' && HIDDEN_PREP_PROGRESS_TITLES.has(progress.title)) return false
+  if ((progress.depth ?? 0) === 0 && progress.stage === 'run_finished' && progress.title === '回答生成完成') return false
+  return true
+}
 
 function subAgentProgressGroupKey(progress: AgentProgressEvent) {
   return [
@@ -905,6 +919,7 @@ function MentionField({
   onAdd,
   onLoadMore,
   onRemove,
+  onSearch,
 }: {
   sessions: MentionTarget[]
   mentions: MentionTarget[]
@@ -913,6 +928,7 @@ function MentionField({
   onAdd: (m: MentionTarget) => void
   onLoadMore: () => void
   onRemove: (username: string) => void
+  onSearch: (query: string) => void
 }) {
   const { textInput } = usePromptInputController()
   const value = textInput.value
@@ -938,6 +954,13 @@ function MentionField({
   useEffect(() => {
     if (query !== null && sessions.length === 0 && hasMore && !isLoading) onLoadMore()
   }, [hasMore, isLoading, onLoadMore, query, sessions.length])
+
+  useEffect(() => {
+    const q = query?.trim()
+    if (!q) return
+    const timer = window.setTimeout(() => onSearch(q), 180)
+    return () => window.clearTimeout(timer)
+  }, [onSearch, query])
 
   const loadNextVisibleBatch = useCallback(() => {
     if (visibleLimit < allResults.length) {
@@ -1659,7 +1682,7 @@ export default function AgentPage() {
   const [agentNotice, setAgentNotice] = useState('')
   const [usageDetailsModal, setUsageDetailsModal] = useState<AgentMessageMetadata | null>(null)
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null)
-  const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null)
+  const { speakingKey: speakingMessageId, speak: speakMessage, stop: stopSpeakingMessage } = useTtsSpeaker()
   const selectedPreset = useMemo(
     () => presets.find((preset) => preset.id === selectedPresetId) || null,
     [presets, selectedPresetId]
@@ -1734,6 +1757,7 @@ export default function AgentPage() {
   const mentionHasMoreRef = useRef(true)
   const mentionConnectedRef = useRef(false)
   const mentionSeenRef = useRef(new Set<string>())
+  const mentionSearchSeqRef = useRef(0)
   const addMention = useCallback(
     (m: MentionTarget) => setMentions((prev) => (prev.some((x) => x.username === m.username) ? prev : [...prev, m])),
     []
@@ -1754,13 +1778,16 @@ export default function AgentPage() {
       : { kind: 'global' }
 
   const handleAgentProgress = useCallback((progress: AgentProgressEvent) => {
+    const displayProgress = shouldDisplayAgentProgress(progress)
     if ((progress.depth ?? 0) > 0) {
-      setSubAgentProgress((prev) => mergeSubAgentProgress(prev, progress))
+      if (displayProgress) setSubAgentProgress((prev) => mergeSubAgentProgress(prev, progress))
     } else {
-      setAgentProgress((prev) => {
-        const withoutLocalPending = prev.filter((item) => item.title !== AGENT_PENDING_TITLE)
-        return mergeSubAgentProgress(withoutLocalPending, progress)
-      })
+      if (displayProgress) {
+        setAgentProgress((prev) => {
+          const withoutLocalPending = prev.filter((item) => item.title !== AGENT_PENDING_TITLE)
+          return mergeSubAgentProgress(withoutLocalPending, progress)
+        })
+      }
       if (progress.stage === 'run_started') {
         setSubAgentProgress([])
       } else if (progress.stage === 'run_finished' || progress.stage === 'error') {
@@ -1786,29 +1813,13 @@ export default function AgentPage() {
   }, [])
 
   const handleSpeakAssistantMessage = useCallback((messageId: string, text: string) => {
-    if (!text || typeof window === 'undefined' || !('speechSynthesis' in window)) return
-    if (speakingMessageId === messageId) {
-      window.speechSynthesis.cancel()
-      setSpeakingMessageId(null)
-      return
-    }
-
-    window.speechSynthesis.cancel()
-    const utterance = new SpeechSynthesisUtterance(text)
-    utterance.lang = 'zh-CN'
-    utterance.onend = () => setSpeakingMessageId((current) => current === messageId ? null : current)
-    utterance.onerror = () => setSpeakingMessageId((current) => current === messageId ? null : current)
-    setSpeakingMessageId(messageId)
-    window.speechSynthesis.speak(utterance)
-  }, [speakingMessageId])
+    if (!text) return
+    void speakMessage(messageId, text)
+  }, [speakMessage])
 
   useEffect(() => {
-    return () => {
-      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-        window.speechSynthesis.cancel()
-      }
-    }
-  }, [])
+    return () => { stopSpeakingMessage() }
+  }, [stopSpeakingMessage])
   const [conversationId, setConversationId] = useState<number | null>(null)
   const conversationIdRef = useRef(conversationId)
   conversationIdRef.current = conversationId
@@ -1935,6 +1946,30 @@ export default function AgentPage() {
       setMentionLoading(false)
     }
   }, [appendMentionTargets, updateMentionHasMore])
+
+  const searchMentionSessions = useCallback(async (query: string) => {
+    const keyword = query.trim()
+    if (!keyword) return
+    const seq = ++mentionSearchSeqRef.current
+    const chat = (window as any)?.electronAPI?.chat
+    setMentionLoading(true)
+
+    try {
+      if (!mentionConnectedRef.current) {
+        try { await chat?.connect?.() } catch { /* 配置不全则后续为空 */ }
+        mentionConnectedRef.current = true
+      }
+
+      const res = await chat?.getMentionTargets?.(0, MENTION_SESSION_PAGE_SIZE, keyword)
+      if (seq === mentionSearchSeqRef.current && res?.success && Array.isArray(res.sessions)) {
+        appendMentionTargets(
+          res.sessions.map((s: any) => toMentionTarget(s.username, s.displayName, s.avatarUrl))
+        )
+      }
+    } finally {
+      if (seq === mentionSearchSeqRef.current) setMentionLoading(false)
+    }
+  }, [appendMentionTargets])
 
   const refreshConversationRecords = useCallback(async () => {
     const result = await window.electronAPI.agent.listConversations()
@@ -2217,7 +2252,7 @@ export default function AgentPage() {
     submitScopeRef.current = submitScope
     runIsPlanRef.current = planModeRef.current
     setAgentNotice('')
-    setAgentProgress([{ stage: 'run_started', title: AGENT_PENDING_TITLE, detail: '正在创建会话并准备上下文', at: Date.now() }])
+    setAgentProgress([])
     setAgentRunPending(true)
     setSubAgentProgress([])
 
@@ -2258,12 +2293,9 @@ export default function AgentPage() {
     const files = userMessage.parts.filter((part): part is Extract<UIMessage['parts'][number], { type: 'file' }> => part.type === 'file')
     if (!text && files.length === 0) return
 
-    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-      window.speechSynthesis.cancel()
-      setSpeakingMessageId(null)
-    }
+    stopSpeakingMessage()
     setAgentNotice('')
-    setAgentProgress([{ stage: 'run_started', title: AGENT_PENDING_TITLE, detail: '正在重新生成回答', at: Date.now() }])
+    setAgentProgress([])
     setAgentRunPending(true)
     setSubAgentProgress([])
     runIsPlanRef.current = planModeRef.current
@@ -2284,7 +2316,7 @@ export default function AgentPage() {
     runIsPlanRef.current = false
     setPlanMode(false)
     setAgentNotice('')
-    setAgentProgress([{ stage: 'run_started', title: AGENT_PENDING_TITLE, detail: '正在按计划执行', at: Date.now() }])
+    setAgentProgress([])
     setAgentRunPending(true)
     setSubAgentProgress([])
     submitScopeRef.current = activeScopeRef.current
@@ -2642,6 +2674,26 @@ export default function AgentPage() {
                           </MessageAttachments>
                         )
                       }
+                      // generate_image 工具的产出图：直接展示在消息流里，点击打开灯箱预览
+                      if (part.type === 'tool-generate_image' && part.state === 'output-available') {
+                        const filePath = String((part.output as { filePath?: unknown } | undefined)?.filePath || '')
+                        if (!filePath) return null
+                        return (
+                          <button
+                            className="mt-1 block w-fit cursor-zoom-in border-0 bg-transparent p-0 text-left"
+                            key={`genimg-${index}`}
+                            onClick={() => { void window.electronAPI.window.openImageViewerWindow(filePath) }}
+                            title="点击预览"
+                            type="button"
+                          >
+                            <img
+                              alt="AI 生成的图片"
+                              className="max-h-90 max-w-full rounded-(--agent-radius,12px) border border-border/60 shadow-xs"
+                              src={`local-image://${encodeURIComponent(filePath)}`}
+                            />
+                          </button>
+                        )
+                      }
                       return null
                     })}
                     {message.role === 'assistant' && (
@@ -2723,6 +2775,7 @@ export default function AgentPage() {
                 onAdd={addMention}
                 onLoadMore={loadMentionSessions}
                 onRemove={removeMention}
+                onSearch={searchMentionSessions}
                 sessions={sessions}
               />
               {mentions.length === 1 && (

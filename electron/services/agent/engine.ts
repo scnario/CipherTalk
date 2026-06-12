@@ -5,15 +5,17 @@
 import { generateText, smoothStream, ToolLoopAgent, stepCountIs, type ModelMessage, type UIMessageChunk } from 'ai'
 import type { SystemModelMessage } from '@ai-sdk/provider-utils'
 import { createLanguageModel } from './provider'
-import { buildAgentPromptParts, PLAN_MODE_PROMPT, WEB_SEARCH_PROMPT } from './prompts'
+import { buildAgentPromptParts, IMAGE_GEN_PROMPT, PLAN_MODE_PROMPT, WEB_SEARCH_PROMPT } from './prompts'
 import { isWebSearchAvailable } from '../ai/webSearchService'
+import { isImageGenAvailable } from '../ai/imageGenService'
 import { applyAnthropicCacheControl, buildPromptCacheKey, buildProviderOptions } from './cache'
 import { buildPlanModeTools, buildTools } from './tools'
-import { buildMemoryContext, extractMemories, preloadRelevantMemories } from './tools/memory'
+import { buildMemoryContext, extractMemories } from './tools/memory'
 import { compactMessages } from './compaction'
 import { runFinalReview, summarizeToolOutput, type ToolOutputSummary } from './finalReview'
 import { loopGuardCondition, withToolTimeouts } from './guards'
 import { reportAgentProgress, withAgentProgress } from './progress'
+import { getCachedStartupMemory, warmStartupMemory } from './runtimeCache'
 import { buildToolRuntimeContext } from './toolPolicy'
 import type { AgentProgressReporter, AgentProviderConfig, AgentRunInput } from './types'
 
@@ -26,12 +28,14 @@ export function buildAgentInstructions(
   relevantMemoryContext: string,
   tools: ReturnType<typeof buildTools>,
   webSearchOn = false,
+  imageGenOn = false,
 ): { instructions: SystemModelMessage[]; tools: ReturnType<typeof buildTools>; promptCacheKey: string } {
   const promptParts = buildAgentPromptParts(input.scope, input.skills)
   const dynamicSystem = [
     promptParts.dynamicSystem,
     input.planMode ? PLAN_MODE_PROMPT : '',
     webSearchOn ? WEB_SEARCH_PROMPT : '',
+    imageGenOn ? IMAGE_GEN_PROMPT : '',
     memoryContext,
     relevantMemoryContext,
   ].filter(Boolean).join('\n')
@@ -186,16 +190,18 @@ export async function runAgent(
 ): Promise<void> {
   await withAgentProgress(onProgress, async () => {
     const userText = lastUserText(input.messages)
-    reportAgentProgress({ stage: 'run_started', title: '正在加载长期记忆' })
-    const memoryContext = await buildMemoryContext(input.scope)
-    reportAgentProgress({ stage: 'run_started', title: '正在召回相关记忆' })
-    const relevantMemoryContext = await preloadRelevantMemories(userText, input.scope)
-    reportAgentProgress({ stage: 'run_started', title: '正在准备工具' })
+    const cachedMemoryContext = getCachedStartupMemory(input.scope)
+    const memoryContext = cachedMemoryContext ?? ''
+    if (cachedMemoryContext === null) {
+      warmStartupMemory(input.scope, () => buildMemoryContext(input.scope))
+    }
+    const relevantMemoryContext = ''
     const webSearchOn = isWebSearchAvailable()
+    const imageGenOn = isImageGenAvailable()
     const baseTools = withToolTimeouts(input.planMode
       ? buildPlanModeTools(input.scope)
-      : buildTools(input.scope, input.providerConfig, input.mcpTools, webSearchOn))
-    const prepared = buildAgentInstructions(input, memoryContext, relevantMemoryContext, baseTools, webSearchOn)
+      : buildTools(input.scope, input.providerConfig, input.mcpTools, webSearchOn, imageGenOn))
+    const prepared = buildAgentInstructions(input, memoryContext, relevantMemoryContext, baseTools, webSearchOn, imageGenOn)
     const agent = new ToolLoopAgent({
       model: createLanguageModel(input.providerConfig),
       instructions: prepared.instructions,
@@ -211,7 +217,6 @@ export async function runAgent(
       }),
     })
 
-    reportAgentProgress({ stage: 'run_started', title: '正在请求模型' })
     const result = await agent.stream({
       messages: input.messages,
       abortSignal: signal,

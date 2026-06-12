@@ -89,6 +89,52 @@ export class AgentProcessService {
     return result.title
   }
 
+  /** 克隆好友：在子进程内跑画像提取（两路 generateObject），返回画像卡 + few-shot。 */
+  async extractPersona(input: import('./persona/personaTypes').PersonaExtractInput): Promise<import('./persona/personaTypes').PersonaExtractResult> {
+    return this.call('extractPersona', input)
+  }
+
+  /** 深层画像 map 阶段：单块历史 → 部分画像。 */
+  async extractProfileChunk(input: import('./persona/personaTypes').PersonaProfileChunkInput): Promise<import('./persona/personaTypes').PersonaProfile> {
+    return this.call('extractProfileChunk', input)
+  }
+
+  /** 深层画像 reduce 阶段：多块部分画像 → 合并画像。 */
+  async mergeProfile(input: import('./persona/personaTypes').PersonaProfileMergeInput): Promise<import('./persona/personaTypes').PersonaProfile> {
+    return this.call('mergeProfile', input)
+  }
+
+  /** 增量进化：旧画像 + 新增聊天 → 修订后的画像。 */
+  async revisePersona(input: import('./persona/personaTypes').PersonaReviseInput): Promise<import('./persona/personaTypes').PersonaReviseResult> {
+    return this.call('revisePersona', input)
+  }
+
+  /** 克隆对话反思：提炼导演笔记 + 对话摘要。 */
+  async reflectPersona(input: import('./persona/personaTypes').PersonaReflectInput): Promise<import('./persona/personaTypes').PersonaReflectResult> {
+    return this.call('reflectPersona', input)
+  }
+
+  /** 克隆好友聊天：预检索 + 单次 generateText，完整生成后经 onChunk 按气泡回调（复用 run 的 chunk 通道）。 */
+  async personaChat(
+    input: import('./persona/personaTypes').PersonaChatInput,
+    onChunk: (chunk: UIMessageChunk) => void,
+    onProgress?: (progress: AgentProgressEvent) => void,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const runId = `persona-${++this.runSeq}`
+    this.chunkHandlers.set(runId, onChunk)
+    if (onProgress) this.progressHandlers.set(runId, onProgress)
+    if (signal) {
+      signal.addEventListener('abort', () => { void this.call('abort', { runId }).catch(() => undefined) })
+    }
+    try {
+      await this.call<{ done: boolean }>('personaChat', { runId, ...input })
+    } finally {
+      this.chunkHandlers.delete(runId)
+      this.progressHandlers.delete(runId)
+    }
+  }
+
   shutdown(): void {
     this.shuttingDown = true
     const w = this.worker
