@@ -154,6 +154,12 @@ export function warmupAgentProcess(ctx: MainProcessContext): void {
         agentProcessService.setLogger(ctx.getLogService())
         const startedAt = Date.now()
         await agentProcessService.ping()
+        // 顺带预热首条消息的准备链路：主进程 ai 模块加载 + 系统代理探测，免得用户首问时才付这两笔
+        const [{ refreshResolvedProxyUrl }] = await Promise.all([
+          import('../services/ai/proxyFetch'),
+          import('ai'),
+        ])
+        await refreshResolvedProxyUrl()
         markStartupMilestone('startup:agent-warmup-done', { elapsedMs: Date.now() - startedAt })
       } catch (e) {
         warnStartupMilestone('startup:agent-warmup-failed', { error: (e as Error)?.message || String(e) })
@@ -168,13 +174,6 @@ export function warmupAgentProcess(ctx: MainProcessContext): void {
  */
 export function checkForUpdatesOnStartup(ctx: MainProcessContext): void {
   if (process.env.VITE_DEV_SERVER_URL) {
-    // 开发模式：推送一条模拟的更新通知，便于本地测试更新提示 UI（不会真实下载/安装）
-    setTimeout(() => {
-      const mainWindow = ctx.getMainWindow()
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('app:updateAvailable', appUpdateService.createSimulatedUpdateInfo())
-      }
-    }, 3000)
     return
   }
 

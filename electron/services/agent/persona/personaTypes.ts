@@ -53,6 +53,22 @@ export interface PersonaPair {
   replies: string[]
 }
 
+/**
+ * TA 常用的一张表情包（克隆时从历史消息统计，私聊 + 群聊发言）。
+ * contexts 是 TA 发这张表情前别人/自己说的话，给 LLM 判断这张表情的"语义"用。
+ */
+export interface PersonaSticker {
+  md5: string
+  cdnUrl: string
+  productId?: string
+  encryptUrl?: string
+  aesKey?: string
+  /** 历史上用过的次数 */
+  count: number
+  /** 使用情境示例（≤3 条短句） */
+  contexts: string[]
+}
+
 /** 导演笔记：从克隆对话里反思出的纠正规则 + 分身自己的对话记忆。 */
 export interface PersonaNotes {
   /** 用户对扮演的纠正/指示（必须遵守） */
@@ -71,6 +87,10 @@ export interface PersonaStats {
   avgFriendMsgChars: number
   /** 对方平均一轮连发几条 */
   avgFriendBurst: number
+  /** 私聊语料不足时补充收集的群聊发言条数（仅喂风格卡/深层画像，不进问答对） */
+  groupMessageCount?: number
+  /** 群聊发言来自几个群 */
+  groupSessionCount?: number
 }
 
 export interface PersonaRecord {
@@ -83,6 +103,8 @@ export interface PersonaRecord {
   stats: PersonaStats
   /** 深层画像；旧记录可能为 null（重建后才有） */
   profile: PersonaProfile | null
+  /** TA 常用的表情包词典（旧记录为空数组，重建后才有） */
+  stickers: PersonaSticker[]
   /** 已蒸馏到的消息时间水位（createTime 秒），增量进化用 */
   corpusUntil: number
   modelProvider: string
@@ -98,6 +120,8 @@ export interface PersonaExtractInput {
   friendName: string
   /** 渲染好的对话语料（轮次合并后，连发用 ／ 分隔） */
   corpusText: string
+  /** 群聊补充语料（TA 在群里的发言节选）：只喂风格卡，不喂 few-shot 挖掘（群聊问答错位） */
+  groupCorpusText?: string
   stats: PersonaStats
 }
 
@@ -159,6 +183,8 @@ export interface PersonaChatPersona {
   stats: PersonaStats
   profile?: PersonaProfile | null
   notes?: PersonaNotes
+  /** TA 常用的表情包词典；模型按编号点播，引擎换成真实表情包气泡 */
+  stickers?: PersonaSticker[]
 }
 
 /** 主进程 → AI 子进程的克隆聊天请求载荷。 */

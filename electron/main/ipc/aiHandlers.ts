@@ -4,13 +4,14 @@ import { join } from 'path'
 import type { UIMessage } from 'ai'
 import type { MainProcessContext } from '../context'
 import type { AgentProviderConfig, AgentProviderConfigOverride, AgentScope } from '../../services/agent/types'
-import type { PersonaNotes, PersonaProfile } from '../../services/agent/persona/personaTypes'
+import type { PersonaNotes, PersonaProfile, PersonaStats } from '../../services/agent/persona/personaTypes'
 
 /** 进行中的 agent 运行：runId → AbortController，用于取消。 */
 const agentAborters = new Map<string, AbortController>()
 const AGENT_RUN_PROXY_CACHE_TTL_MS = 5 * 60 * 1000
-// 准备阶段重排超时：超时直接回退原排序（不影响正确性），别让慢服务拖住首包
+// 准备阶段网络调用（查询嵌入/重排）超时：超时直接走降级路径（不影响正确性），别让慢服务拖住首包
 const AGENT_PREP_RERANK_TIMEOUT_MS = 800
+const AGENT_PREP_PROGRESS_TITLE = '大模型准备中'
 
 let agentRunProxyRefreshedAt = 0
 let agentRunProxyRefreshPromise: Promise<string | null> | null = null
@@ -162,17 +163,41 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
     let lastActivityKind = 'start'
     let idleWarningCount = 0
     let watchdog: NodeJS.Timeout | null = null
+    // 发送后各阶段耗时打点：每步一行 [agent:perf] 打到控制台，完整时间线随完成日志落盘
+    let perfLastAt = startedAt
+    const perfTimeline: string[] = []
+    const markPerf = (label: string, detail?: string) => {
+      const now = Date.now()
+      const entry = `${label} +${now - perfLastAt}ms${detail ? `（${detail}）` : ''}`
+      perfTimeline.push(entry)
+      console.info(`[agent:perf] ${runId} ${entry}，累计 ${now - startedAt}ms`)
+      perfLastAt = now
+    }
+    // 并行任务用绝对耗时记录（互相重叠，增量没意义）
+    const timedTask = async <T,>(label: string, task: Promise<T>): Promise<T> => {
+      const t0 = Date.now()
+      try {
+        return await task
+      } finally {
+        const entry = `${label} 耗时 ${Date.now() - t0}ms`
+        perfTimeline.push(entry)
+        console.info(`[agent:perf] ${runId} ${entry}`)
+      }
+    }
     agentAborters.set(runId, aborter)
-    const sendPrepProgress = (title: string, detail?: string, visible = false) => {
+    let prepProgressSent = false
+    // 准备阶段对用户合并成单一步骤；细分阶段只保留在 stage/perf 日志里。
+    const sendPrepProgress = (visible = true) => {
       lastActivityAt = Date.now()
       lastActivityKind = 'progress'
       idleWarningCount = 0
-      if (!visible) return
+      if (!visible || prepProgressSent) return
+      prepProgressSent = true
       progressCount += 1
       sendProgress({
         stage: 'run_started',
-        title,
-        detail,
+        title: AGENT_PREP_PROGRESS_TITLE,
+        category: 'prep',
         elapsedMs: Date.now() - startedAt,
         at: Date.now(),
       })
@@ -180,27 +205,31 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
     logger?.warn('AIAgent', 'AI Agent 请求开始', baseRunData)
     try {
       stage = 'import_services'
-      sendPrepProgress('正在准备 Agent')
+      sendPrepProgress()
       const { agentProcessService } = await import('../../services/agent/agentProcessService')
       agentProcessService.setLogger(logger)
       const { resolveProviderConfig } = await import('../../services/agent/resolveProviderConfig')
       const { refreshResolvedProxyUrl } = await import('../../services/ai/proxyFetch')
       const { convertToModelMessages } = await import('ai')
+      markPerf('加载主进程服务模块')
       stage = 'refresh_proxy'
-      sendPrepProgress('正在检测代理')
+      sendPrepProgress()
       await refreshAgentRunProxyCached(refreshResolvedProxyUrl) // 主进程探测系统代理并持久化，供子进程 agent/嵌入读取
+      markPerf('系统代理探测')
       stage = 'resolve_provider'
-      sendPrepProgress('正在准备模型配置')
+      sendPrepProgress()
       const providerConfig = resolveProviderConfig(payload.modelConfig)
+      markPerf('解析模型配置')
       stage = 'convert_messages'
-      sendPrepProgress('正在整理消息')
+      sendPrepProgress()
       const uiMessages = shouldStripProviderMetadata(providerConfig)
         ? stripUiMessageProviderMetadata(payload.messages)
         : payload.messages
       const messages = await convertToModelMessages(uiMessages)
+      markPerf('整理消息', `${messages.length} 条`)
       const lastUserText = lastUserTextFromUiMessages(payload.messages)
       stage = 'load_context_services'
-      sendPrepProgress('正在加载上下文服务')
+      sendPrepProgress()
       const { mcpClientService } = await import('../../services/mcpClientService')
       const { buildReadOnlyMcpToolDescriptors } = await import('../../services/agent/mcpToolPolicy')
       const { skillManagerService } = await import('../../services/skillManagerService')
@@ -224,8 +253,9 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
         setCachedMcpToolDescriptors(mcpToolVersion, readOnlyMcpTools)
       }
       const skillManifestVersion = fingerprintSkills(skillManagerService.listSkills())
+      markPerf('加载上下文服务模块', `只读 MCP 工具 ${readOnlyMcpTools.length} 个`)
       stage = 'select_tools_and_skills'
-      sendPrepProgress('正在筛选工具与技能', `只读 MCP 工具 ${readOnlyMcpTools.length} 个`)
+      sendPrepProgress()
       // MCP 工具筛选+重排 与 技能选择 互相独立，并行执行；
       // 两路对同一问题的查询嵌入由 embedQuery 的在飞缓存合并成一次请求。
       const selectMcpToolsTask = async () => {
@@ -260,7 +290,7 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
                 readOnlyMcpTools,
                 24,
                 undefined,
-                { requireCurrent: true },
+                { requireCurrent: true, queryTimeoutMs: AGENT_PREP_RERANK_TIMEOUT_MS, queryMaxRetries: 0 },
               )
               if (vectorMcpTools.length > 0) candidates = vectorMcpTools
             } else if (mcpVectorStatus.currentCount > 0) {
@@ -312,10 +342,11 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
         return { skills, skillCacheHit: false }
       }
       const [{ mcpTools, mcpRerankMeta, mcpCandidates, mcpCacheHit }, { skills, skillCacheHit }] = await Promise.all([
-        selectMcpToolsTask(),
-        selectSkillsTask(),
+        timedTask('MCP 工具筛选（嵌入+重排）', selectMcpToolsTask()),
+        timedTask('技能筛选（嵌入+重排）', selectSkillsTask()),
       ])
-      sendPrepProgress('已选定工具与技能', `MCP 工具 ${mcpTools.length} 个 · 技能 ${skills.length} 个`)
+      markPerf('工具与技能筛选', `MCP ${mcpTools.length} 个${mcpCacheHit ? '·缓存' : ''} / 技能 ${skills.length} 个${skillCacheHit ? '·缓存' : ''}`)
+      sendPrepProgress()
       if (mcpTools.length > 0 || skills.length > 0) {
         console.info('[agent:run] injected context', {
           mcpTools: mcpTools.map((tool) => `${tool.serverName}/${tool.toolName}`),
@@ -339,7 +370,7 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
         skillSelectionCacheHit: skillCacheHit,
       })
       stage = 'run_agent_process'
-      sendPrepProgress('正在交给 Agent 进程')
+      sendPrepProgress()
       watchdog = setInterval(() => {
         const idleMs = Date.now() - lastActivityAt
         if (idleMs < 10000) return
@@ -355,10 +386,14 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
           lastActivityKind,
         })
       }, 15000)
+      markPerf('交给 Agent 子进程')
       logger?.warn('AIAgent', 'AI Agent 已交给 utility process 运行', {
         ...baseRunData,
         elapsedMs: Date.now() - startedAt,
+        prepTimeline: perfTimeline.slice(),
       })
+      let firstChunkSeen = false
+      let firstModelOutputSeen = false
       await agentProcessService.run(
         { messages, providerConfig, scope, mcpTools, skills, planMode: payload.planMode === true },
         (chunk) => {
@@ -366,6 +401,15 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
           lastActivityAt = Date.now()
           lastActivityKind = 'chunk'
           idleWarningCount = 0
+          const chunkType = (chunk as { type?: string })?.type || ''
+          if (!firstChunkSeen) {
+            firstChunkSeen = true
+            markPerf('子进程回传首个 chunk', chunkType)
+          }
+          if (!firstModelOutputSeen && (chunkType === 'text-delta' || chunkType === 'reasoning-delta' || chunkType === 'tool-input-start')) {
+            firstModelOutputSeen = true
+            markPerf('模型首个增量输出', chunkType)
+          }
           send(chunk)
         },
         (progress) => {
@@ -379,11 +423,13 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
       )
       stage = 'done'
       send('[DONE]')
+      markPerf('本次运行结束')
       logger?.warn('AIAgent', 'AI Agent 请求完成', {
         ...baseRunData,
         elapsedMs: Date.now() - startedAt,
         chunkCount,
         progressCount,
+        perfTimeline,
       })
       return { success: true }
     } catch (e) {
@@ -394,6 +440,7 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
         elapsedMs: Date.now() - startedAt,
         chunkCount,
         progressCount,
+        perfTimeline,
         ...errorToLogData(e),
       })
       sendProgress({ stage: 'error', title: 'AI 助手运行失败', detail: message, at: Date.now() })
@@ -887,6 +934,7 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
             stats: persona.stats,
             profile: persona.profile,
             notes,
+            stickers: persona.stickers,
           },
           messages,
         },
@@ -1003,7 +1051,13 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
         profile: revised.profile,
         // 新黄金样本追加在后、总量封顶（最新的优先保留）
         fewShots: [...persona.fewShots, ...revised.newFewShots].slice(-10),
-        stats: buildPersonaCorpus(messages, persona.displayName).stats,
+        // 群聊来源标记保留：画像卡里群聊提炼的内容不会因增量修订消失
+        stats: {
+          ...buildPersonaCorpus(messages, persona.displayName).stats,
+          ...(persona.stats.groupMessageCount
+            ? { groupMessageCount: persona.stats.groupMessageCount, groupSessionCount: persona.stats.groupSessionCount }
+            : {}),
+        },
         corpusUntil,
       })
 
@@ -1060,7 +1114,11 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
 
       const transcript = unreflected
         .map((m) => {
-          const text = textFromUiMessage(m).replace(/\n+/g, '／').trim()
+          // 表情包气泡的 JSON 载荷对反思没用，压成可读标记
+          const text = textFromUiMessage(m)
+            .replace(/\[表情包\]\{[^}]*\}/g, '[发了个表情包]')
+            .replace(/\n+/g, '／')
+            .trim()
           return text ? `${m.role === 'user' ? '我' : `${persona.displayName}（分身）`}: ${text}` : ''
         })
         .filter(Boolean)
@@ -1133,13 +1191,37 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
       }, 6000)
 
       sendProgress('corpus', '正在分析说话风格', 40)
-      const { buildPersonaCorpus, MIN_FRIEND_MESSAGES, mergeTurns, renderProfileChunks, extractPersonaPairs } =
+      const { buildPersonaCorpus, MIN_FRIEND_MESSAGES, PROFILE_MAX_CHUNKS, mergeTurns, renderProfileChunks, extractPersonaPairs } =
         await import('../../services/agent/persona/personaCorpus')
       const corpus = buildPersonaCorpus(messages, displayName)
+
+      // 私聊语料不足时，从 TA 所在群聊收集发言补充（只喂风格卡/深层画像，不进问答对——群聊问答错位）
+      let groupCorpus: import('../../services/agent/persona/personaGroupCorpus').PersonaGroupCorpus | null = null
       if (corpus.stats.friendMessageCount < MIN_FRIEND_MESSAGES) {
-        const error = `与「${displayName}」的可用文本消息太少（${corpus.stats.friendMessageCount} 条，至少需要 ${MIN_FRIEND_MESSAGES} 条），不足以克隆`
-        sendProgress('error', '克隆失败', 100, error)
-        return { success: false, error }
+        sendProgress('corpus', '私聊语料不足，正在收集群聊发言', 42)
+        try {
+          const { collectGroupCorpus } = await import('../../services/agent/persona/personaGroupCorpus')
+          groupCorpus = await collectGroupCorpus(sessionId, displayName, (detail) => {
+            sendProgress('corpus', '私聊语料不足，正在收集群聊发言', 44, detail)
+          })
+        } catch (e) {
+          logger?.warn('Persona', '群聊语料收集失败，仅用私聊语料', { sessionId, ...errorToLogData(e) })
+        }
+        const totalFriendMessages = corpus.stats.friendMessageCount + (groupCorpus?.friendMessageCount || 0)
+        if (totalFriendMessages < MIN_FRIEND_MESSAGES) {
+          const groupNote = groupCorpus?.friendMessageCount
+            ? `私聊 ${corpus.stats.friendMessageCount} 条 + 群聊 ${groupCorpus.friendMessageCount} 条`
+            : `${corpus.stats.friendMessageCount} 条`
+          const error = `与「${displayName}」的可用文本消息太少（${groupNote}，至少需要 ${MIN_FRIEND_MESSAGES} 条），不足以克隆`
+          sendProgress('error', '克隆失败', 100, error)
+          return { success: false, error }
+        }
+      }
+      const stats: PersonaStats = {
+        ...corpus.stats,
+        ...(groupCorpus?.friendMessageCount
+          ? { groupMessageCount: groupCorpus.friendMessageCount, groupSessionCount: groupCorpus.groupCount }
+          : {}),
       }
       const turns = mergeTurns(messages)
 
@@ -1150,11 +1232,14 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
         providerConfig,
         friendName: displayName,
         corpusText: corpus.corpusText,
-        stats: corpus.stats,
+        groupCorpusText: groupCorpus?.friendMessageCount ? groupCorpus.corpusText : undefined,
+        stats,
       })
 
       // 深层画像 map-reduce：逐块提取（并发 3，单块失败跳过），全失败则降级为无深层画像
-      const profileChunks = renderProfileChunks(turns, displayName)
+      // 群聊块排私聊块之后，总量仍封顶（私聊不足时私聊块本来就少，群聊块补得进来）
+      const profileChunks = [...renderProfileChunks(turns, displayName), ...(groupCorpus?.profileChunks || [])]
+        .slice(0, PROFILE_MAX_CHUNKS)
       const parts: Array<PersonaProfile | undefined> = new Array(profileChunks.length)
       let nextChunk = 0
       let doneChunks = 0
@@ -1189,6 +1274,13 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
         }
       }
 
+      // 表情包词典：TA 私聊+群聊发过的表情包按使用频率统计，聊天时模型可按编号点播
+      const { collectStickers, mergeStickers } = await import('../../services/agent/persona/personaStickers')
+      const stickers = mergeStickers(
+        collectStickers(messages, (m) => m.isSend !== 1),
+        groupCorpus?.stickers || [],
+      )
+
       sendProgress('saving', '正在保存画像', 88)
       const { personaStore } = await import('../../services/agent/persona/personaStore')
       const corpusUntil = messages.reduce((max, m) => Math.max(max, m.createTime), 0)
@@ -1197,8 +1289,9 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
         displayName,
         card: extracted.card,
         fewShots: extracted.fewShots,
-        stats: corpus.stats,
+        stats,
         profile,
+        stickers,
         corpusUntil,
         modelProvider: providerConfig.name,
         modelId: providerConfig.model,
@@ -1221,6 +1314,8 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
         sessionId,
         elapsedMs: Date.now() - startedAt,
         friendMessageCount: corpus.stats.friendMessageCount,
+        groupMessageCount: groupCorpus?.friendMessageCount || 0,
+        stickerCount: stickers.length,
         fewShotCount: persona.fewShots.length,
         profileChunkCount: profileChunks.length,
         hasProfile: !!profile,

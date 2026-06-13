@@ -213,8 +213,19 @@ export interface PersonaRecordInfo {
     friendMessageCount: number
     avgFriendMsgChars: number
     avgFriendBurst: number
+    groupMessageCount?: number
+    groupSessionCount?: number
   }
   profile: PersonaProfileInfo | null
+  stickers?: Array<{
+    md5: string
+    cdnUrl: string
+    productId?: string
+    encryptUrl?: string
+    aesKey?: string
+    count: number
+    contexts: string[]
+  }>
   corpusUntil: number
   modelProvider: string
   modelId: string
@@ -247,7 +258,7 @@ export interface ElectronAPI {
     completeWelcome: () => Promise<boolean>
     isChatWindowOpen: () => Promise<boolean>
     closeChatWindow: () => Promise<boolean>
-    setTitleBarOverlay: (options: { symbolColor: string }) => void
+    setTitleBarOverlay: (options: { hidden?: boolean; symbolColor?: string }) => void
     openImageViewerWindow: (
       imagePath: string,
       liveVideoPath?: string,
@@ -275,6 +286,8 @@ export interface ElectronAPI {
     importZip: () => Promise<{ success: boolean; canceled?: boolean; pet?: { slug: string; displayName: string; description: string; builtin?: boolean }; error?: string }>
     getSprite: (slug: string) => Promise<{ success: boolean; dataUrl?: string; error?: string }>
     setAgentState: (state: string) => void
+    sendAgentProgress: (progress: { stage: string; title: string; detail?: string }) => void
+    getDailySummary: () => Promise<{ success: boolean; text?: string; error?: string }>
     toggleDesktopWindow: (enabled: boolean) => Promise<{ success: boolean }>
     setBubble: (expanded: boolean) => void
     showContextMenu: () => void
@@ -283,6 +296,8 @@ export interface ElectronAPI {
     onBubbleFrame: (callback: (frame: { expanded: boolean; baseLeft: number; baseTop: number; baseWidth: number; baseHeight: number }) => void) => () => void
     onContextMenuOpened: (callback: () => void) => () => void
     onNotify: (callback: (payload: { username: string; displayName: string; avatarUrl?: string; preview: string; timestamp: number }) => void) => () => void
+    onAgentProgress: (callback: (progress: { stage: string; title: string; detail?: string }) => void) => () => void
+    onBubble: (callback: (payload: { kind: string; title: string; text: string; id?: string }) => void) => () => void
   }
   notify: {
     getEnabledSessions: () => Promise<string[]>
