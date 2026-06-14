@@ -8,9 +8,13 @@ import {
 } from 'lucide-react'
 import MacOSDock, { type DockApp } from '@/components/ui/mac-os-dock'
 import { useThemeStore } from '@/stores/themeStore'
+import { useDeviceConnectStatus } from '@/hooks/useDeviceConnectStatus'
+import { DeviceConnectStatusDot } from '@/components/DeviceConnectStatusDot'
+import DeviceConnectDialog from '@/components/DeviceConnectDialog'
 
 const HIDE_DELAY = 2500
 const EDGE_TRIGGER_PX = 8
+const WECHAT_LOGO_SRC = './微信logo.png'
 
 interface AppIconProps {
   Icon: LucideIcon
@@ -40,9 +44,11 @@ function BottomDock() {
   const navigate = useNavigate()
   const location = useLocation()
   const autoHideSetting = useThemeStore(s => s.dockAutoHide)
+  const deviceStatus = useDeviceConnectStatus()
   // 首页强制显示 Dock：避免用户进入软件后找不到导航
   const autoHide = autoHideSetting && location.pathname !== '/home'
   const [visible, setVisible] = useState(true)
+  const [deviceConnectOpen, setDeviceConnectOpen] = useState(false)
   const hideTimerRef = useRef<number | undefined>(undefined)
 
   const clearHideTimer = useCallback(() => {
@@ -108,6 +114,12 @@ function BottomDock() {
     { id: 'chat', name: '聊天查看', icon: makeIcon(MessageSquare, 'linear-gradient(135deg, #2ECC71 0%, #27AE60 100%)') },
     { id: 'moments', name: '朋友圈', icon: makeIcon(Aperture, 'linear-gradient(135deg, #FF7AA2 0%, #E84B7E 100%)') },
     { id: 'transcription', name: '转文字助手', icon: makeIcon(FileAudio, 'linear-gradient(135deg, #5B6CFF 0%, #3F50E0 100%)') },
+    { id: 'device-connect', name: '设备连接', icon: (
+      <div className="relative w-full h-full p-1">
+        <img src={WECHAT_LOGO_SRC} alt="微信" className="h-full w-full object-contain" />
+        <DeviceConnectStatusDot status={deviceStatus} className="absolute right-[4%] top-[4%] size-[26%] ring-2 ring-white" />
+      </div>
+    ) },
     { id: 'export', name: '导出数据', icon: makeIcon(Download, 'linear-gradient(135deg, #1ABC9C 0%, #16A085 100%)') },
     { id: 'data-management', name: '数据管理', icon: makeIcon(Database, 'linear-gradient(135deg, #607D8B 0%, #455A64 100%)') },
     { id: 'open-api', name: '开放接口', icon: makeIcon(Network, 'linear-gradient(135deg, #00BCD4 0%, #0097A7 100%)') },
@@ -121,6 +133,7 @@ function BottomDock() {
       case 'chat': void openChatWindow(); break
       case 'moments': void openMomentsWindow(); break
       case 'transcription': navigate('/transcription-assistant'); break
+      case 'device-connect': setDeviceConnectOpen(true); break
       case 'export': navigate('/export'); break
       case 'data-management': navigate('/data-management'); break
       case 'open-api': navigate('/open-api'); break
@@ -130,23 +143,26 @@ function BottomDock() {
   }
 
   return (
-    <motion.div
-      className="fixed inset-x-0 bottom-0 z-40 pointer-events-none flex justify-center"
-      style={{ paddingBottom: 'calc(14px + env(safe-area-inset-bottom, 0px))' }}
-      animate={{
-        y: visible ? 0 : 140,
-        opacity: visible ? 1 : 0
-      }}
-      transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
-    >
-      <div
-        className={visible ? 'pointer-events-auto' : 'pointer-events-none'}
-        onMouseEnter={handleMouseEnter}
-        onMouseLeave={handleMouseLeave}
+    <>
+      <motion.div
+        className="fixed inset-x-0 bottom-0 z-40 pointer-events-none flex justify-center"
+        style={{ paddingBottom: 'calc(14px + env(safe-area-inset-bottom, 0px))' }}
+        animate={{
+          y: visible ? 0 : 140,
+          opacity: visible ? 1 : 0
+        }}
+        transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
       >
-        <MacOSDock apps={apps} onAppClick={handleAppClick} />
-      </div>
-    </motion.div>
+        <div
+          className={visible ? 'pointer-events-auto' : 'pointer-events-none'}
+          onMouseEnter={handleMouseEnter}
+          onMouseLeave={handleMouseLeave}
+        >
+          <MacOSDock apps={apps} onAppClick={handleAppClick} />
+        </div>
+      </motion.div>
+      <DeviceConnectDialog isOpen={deviceConnectOpen} onClose={() => setDeviceConnectOpen(false)} />
+    </>
   )
 }
 

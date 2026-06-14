@@ -24,6 +24,11 @@ import { createDelegateAnalysis } from './delegateAnalysis'
 import { buildMcpTools } from './mcpExternal'
 import { webSearch } from './webSearch'
 import { generateImage } from './generateImage'
+import { searchStickers, sendSticker } from './stickers'
+import { sendRandomImage } from './sendRandomImage'
+import { sendWechatFile } from './sendWechatFile'
+import { personaControl } from './personaControl'
+import { sendWechatMedia } from './wechatMedia'
 
 /** 基础读/查工具（不含 delegate_analysis），主 Agent 与子 Agent 共用。 */
 export function buildBaseTools(_scope: AgentScope): ToolSet {
@@ -76,6 +81,12 @@ export function buildTools(scope: AgentScope, providerConfig: AgentProviderConfi
     ...buildMcpTools(mcpTools),
     ...(enableWebSearch ? { web_search: webSearch } : {}),
     ...(enableImageGen ? { generate_image: generateImage } : {}),
+    search_stickers: searchStickers,
+    send_sticker: sendSticker,
+    send_random_image: sendRandomImage,
+    send_wechat_media: sendWechatMedia,
+    send_wechat_file: sendWechatFile,
+    persona_control: personaControl,
     remember: createRemember(scope),
     recall: createRecall(scope),
     list_memories: createListMemories(scope),

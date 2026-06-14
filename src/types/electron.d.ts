@@ -80,38 +80,6 @@ export interface EmbeddingVectorStoreInfo {
   dimensions: number[]
 }
 
-export type AgentResourceKind = 'skill' | 'mcp_tool'
-
-export interface AgentResourceBuildProgress {
-  kind: AgentResourceKind
-  stage: 'loading' | 'embedding' | 'done'
-  current: number
-  total: number
-  indexed: number
-  message: string
-}
-
-export interface AgentResourceVectorStoreInfo {
-  dbPath: string
-  exists: boolean
-  sizeBytes: number
-  updatedAtMs: number | null
-  count: number
-  storedCount: number
-  currentCount: number
-  staleCount: number
-  dimensions: number[]
-}
-
-export interface AgentResourceStatus {
-  enabled: boolean
-  kind: AgentResourceKind
-  count: number
-  currentCount: number
-  staleCount: number
-  store: AgentResourceVectorStoreInfo
-}
-
 export interface ImageListItem {
   imagePath: string
   liveVideoPath?: string
@@ -179,6 +147,28 @@ export interface AgentMemoryItem {
   tags: string[]
   sourceRefs?: Array<{ sessionId: string; localId: number; createTime: number; sortSeq: number; senderUsername?: string; excerpt?: string }>
   createdAt: number
+  updatedAt: number
+}
+
+export interface MemoryMigrationStatusInfo {
+  needed: boolean
+  legacyDbPath: string
+  memoryBankPath: string
+  itemCount: number
+  migratedItemCount: number
+  error?: string
+}
+
+export interface MemoryMigrationResultInfo extends MemoryMigrationStatusInfo {
+  success: boolean
+  deletedFiles: string[]
+}
+
+export interface MemoryDiaryEntryInfo {
+  date: string
+  title: string
+  excerpt: string
+  content?: string
   updatedAt: number
 }
 
@@ -304,6 +294,17 @@ export interface ElectronAPI {
     setSessionEnabled: (username: string, enabled: boolean) => Promise<{ success: boolean }>
     setActiveSession: (sessionId: string | null) => void
     activate: () => void
+  }
+  deviceConnect: {
+    wechat: {
+      getStatus: () => Promise<{ status: 'disconnected' | 'connecting' | 'connected' | 'error'; botId: string | null; userId: string | null; error: string | null }>
+      connect: () => Promise<{ success: boolean; qrcodeImage?: string; error?: string }>
+      cancel: () => Promise<{ success: boolean }>
+      disconnect: () => Promise<{ success: boolean }>
+      onStatus: (callback: (payload: { status: 'disconnected' | 'connecting' | 'connected' | 'error'; botId: string | null; userId: string | null; error: string | null }) => void) => () => void
+      onQrcode: (callback: (payload: { qrcodeImage: string }) => void) => () => void
+      onScanState: (callback: (payload: { state: 'scaned' | 'failed'; error?: string }) => void) => () => void
+    }
   }
   accounts: {
     list: () => Promise<AccountProfile[]>
@@ -938,6 +939,26 @@ export interface ElectronAPI {
       failCount?: number
       error?: string
     }>
+    scanDatabases: () => Promise<{
+      success: boolean
+      root?: string
+      databases?: Array<{
+        path: string
+        name: string
+        relativePath: string
+        folder: string
+        size: number
+      }>
+      error?: string
+    }>
+    exportDatabases: (selectedPaths: string[], outputDir: string) => Promise<{
+      success: boolean
+      successCount?: number
+      failCount?: number
+      error?: string
+      outputDir?: string
+      tableErrors?: Array<{ db: string; table: string; error: string }>
+    }>
     onProgress: (callback: (data: {
       current?: number
       total?: number
@@ -1158,10 +1179,17 @@ export interface ElectronAPI {
     onProgress: (runId: string, callback: (progress: unknown) => void) => () => void
   }
   memory: {
+    migrationStatus: () => Promise<{ success: boolean; status?: MemoryMigrationStatusInfo; error?: string }>
+    migrateLegacy: () => Promise<{ success: boolean; result?: MemoryMigrationResultInfo; error?: string }>
     list: (opts?: { sourceType?: 'profile' | 'fact' | 'relationship'; sourceTypes?: Array<'profile' | 'fact' | 'relationship'>; sessionId?: string; tags?: string[]; withoutTags?: string[]; minConfidence?: number; limit?: number }) => Promise<{ success: boolean; items?: AgentMemoryItem[]; stats?: { itemCount: number }; error?: string }>
+    listDiaries: (limit?: number) => Promise<{ success: boolean; diaries?: MemoryDiaryEntryInfo[]; error?: string }>
+    readDiary: (date: string) => Promise<{ success: boolean; diary?: MemoryDiaryEntryInfo; error?: string }>
+    deleteDiary: (date: string) => Promise<{ success: boolean; error?: string }>
+    summarizeTodayDiary: () => Promise<{ success: boolean; alreadyExists?: boolean; diary?: MemoryDiaryEntryInfo; error?: string }>
+    create: (payload: { memoryUid?: string; sourceType?: 'profile' | 'fact' | 'relationship'; content?: string; title?: string; importance?: number; confidence?: number; tags?: string[] }) => Promise<{ success: boolean; item?: AgentMemoryItem; error?: string }>
     delete: (id: number) => Promise<{ success: boolean; error?: string }>
     update: (payload: { id: number; sourceType?: 'profile' | 'fact' | 'relationship'; content?: string; importance?: number; confidence?: number; tags?: string[] }) => Promise<{ success: boolean; item?: AgentMemoryItem; error?: string }>
-    consolidate: () => Promise<{ success: boolean; result?: { removed: number; groups: number; scanned: number }; error?: string }>
+    consolidate: () => Promise<{ success: boolean; result?: { removed: number; groups: number; scanned: number; profileBuilt?: boolean; profileBuildError?: string }; error?: string }>
     exportMarkdown: (outputDir: string) => Promise<{ success: boolean; result?: { files: string[]; itemCount: number }; error?: string }>
   }
   embedding: {
@@ -1170,10 +1198,7 @@ export interface ElectronAPI {
     test: (cfg: EmbeddingConfig) => Promise<{ success: boolean; dimension?: number; error?: string }>
     sessionStatus: (sessionId: string) => Promise<{ success: boolean; enabled?: boolean; count?: number; store?: EmbeddingVectorStoreInfo; error?: string }>
     buildSession: (sessionId: string) => Promise<{ success: boolean; indexed?: number; error?: string }>
-    agentResourceStatus: (kind: AgentResourceKind) => Promise<{ success: boolean; status?: AgentResourceStatus; error?: string }>
-    buildAgentResources: (kind: AgentResourceKind) => Promise<{ success: boolean; indexed?: number; error?: string }>
     onBuildProgress: (callback: (progress: EmbeddingBuildProgress) => void) => () => void
-    onAgentResourceBuildProgress: (callback: (progress: AgentResourceBuildProgress) => void) => () => void
   }
   rerank: {
     getConfig: () => Promise<{ success: boolean; config?: RerankConfig; error?: string }>

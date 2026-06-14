@@ -10,7 +10,7 @@ import { isWebSearchAvailable } from '../ai/webSearchService'
 import { isImageGenAvailable } from '../ai/imageGenService'
 import { applyAnthropicCacheControl, buildPromptCacheKey, buildProviderOptions } from './cache'
 import { buildPlanModeTools, buildTools } from './tools'
-import { buildMemoryContext, extractMemories } from './tools/memory'
+import { afterTurnMemory, buildMemoryContext, preloadRelevantMemories } from './tools/memory'
 import { compactMessages } from './compaction'
 import { runFinalReview, summarizeToolOutput, type ToolOutputSummary } from './finalReview'
 import { loopGuardCondition, withToolTimeouts } from './guards'
@@ -22,6 +22,17 @@ import type { AgentProgressReporter, AgentProviderConfig, AgentRunInput } from '
 const MAX_STEPS = 24
 const DEFAULT_AGENT_TEMPERATURE = 0.2
 
+type SegmenterLike = {
+  segment(input: string): Iterable<unknown>
+}
+
+function createSmoothStreamChunker(): 'word' | SegmenterLike {
+  const segmenterCtor = (Intl as unknown as {
+    Segmenter?: new (locales?: string | string[], options?: { granularity?: 'grapheme' | 'word' | 'sentence' }) => SegmenterLike
+  }).Segmenter
+  return segmenterCtor ? new segmenterCtor('zh', { granularity: 'word' }) : 'word'
+}
+
 export function buildAgentInstructions(
   input: AgentRunInput,
   memoryContext: string,
@@ -30,7 +41,9 @@ export function buildAgentInstructions(
   webSearchOn = false,
   imageGenOn = false,
 ): { instructions: SystemModelMessage[]; tools: ReturnType<typeof buildTools>; promptCacheKey: string } {
-  const promptParts = buildAgentPromptParts(input.scope, input.skills)
+  const promptParts = buildAgentPromptParts(input.scope, input.skills, {
+    includeWechatOutbound: input.outputMode === 'wechat',
+  })
   const dynamicSystem = [
     promptParts.dynamicSystem,
     input.planMode ? PLAN_MODE_PROMPT : '',
@@ -98,12 +111,6 @@ function shouldRunFinalReview(userText: string, assistantText: string, summaries
   return /聊天|消息|记录|朋友圈|群|联系人|谁|哪个|哪里|什么时候|时间|提到|说过|统计|排行|最近|今天|昨天|\d{4}[-/年]\d{1,2}/.test(text)
 }
 
-function shouldExtractAutoMemory(userText: string): boolean {
-  const text = userText.replace(/\s+/g, ' ').trim()
-  if (text.length < 6) return false
-  return /(我是|我叫|我的名字|我喜欢|我不喜欢|我偏好|我习惯|我是.*(人|用户|开发|学生|老师|设计|工程|产品|运营)|.+是我的(朋友|同事|家人|对象|伴侣|同学|老板|客户)|记住|以后.*记得)/.test(text)
-}
-
 function withCacheHitRate(usage: unknown): unknown {
   if (!usage || typeof usage !== 'object') return usage
   const inputTokens = Number((usage as { inputTokens?: unknown }).inputTokens)
@@ -161,11 +168,11 @@ async function injectAutoMemories(
   signal?: AbortSignal,
 ): Promise<void> {
   try {
-    if (!shouldExtractAutoMemory(lastUserText(input.messages))) return
-    const auto = await extractMemories({
+    const userText = lastUserText(input.messages)
+    const auto = await afterTurnMemory({
       scope: input.scope,
       providerConfig: input.providerConfig,
-      userText: lastUserText(input.messages),
+      userText,
       assistantText,
       signal,
     })
@@ -204,12 +211,15 @@ export async function runAgent(
       warmStartupMemory(input.scope, () => buildMemoryContext(input.scope))
     }
     perf('记忆上下文', cachedMemoryContext === null ? '未命中缓存，后台补建' : '缓存命中')
-    const relevantMemoryContext = ''
-    const webSearchOn = isWebSearchAvailable()
-    const imageGenOn = isImageGenAvailable()
-    const baseTools = withToolTimeouts(input.planMode
-      ? buildPlanModeTools(input.scope)
-      : buildTools(input.scope, input.providerConfig, input.mcpTools, webSearchOn, imageGenOn))
+    const relevantMemoryContext = await preloadRelevantMemories(userText, input.scope)
+    const toolsDisabled = input.toolMode === 'disabled'
+    const webSearchOn = !toolsDisabled && isWebSearchAvailable()
+    const imageGenOn = !toolsDisabled && isImageGenAvailable()
+    const baseTools = toolsDisabled
+      ? {}
+      : withToolTimeouts(input.planMode
+        ? buildPlanModeTools(input.scope)
+        : buildTools(input.scope, input.providerConfig, input.mcpTools, webSearchOn, imageGenOn))
     perf('构建工具集', `${Object.keys(baseTools).length} 个`)
     const prepared = buildAgentInstructions(input, memoryContext, relevantMemoryContext, baseTools, webSearchOn, imageGenOn)
     perf('组装系统提示')
@@ -235,7 +245,7 @@ export async function runAgent(
       // 中文没有空格，用 Intl.Segmenter 做 CJK 分词（AI SDK 官方推荐做法）。
       experimental_transform: smoothStream({
         delayInMs: 10,
-        chunking: new Intl.Segmenter('zh', { granularity: 'word' }),
+        chunking: createSmoothStreamChunker(),
       }),
     })
     perf('发起模型流式请求')

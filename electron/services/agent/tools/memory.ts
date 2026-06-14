@@ -1,21 +1,18 @@
 /**
- * 长期记忆工具 —— remember / recall（L2 用户级语义记忆，Letta/LangMem 式「agent 自编辑」范式）。
+ * 长期记忆工具 —— remember / recall（纯 Markdown memory-bank，Letta/LangMem 式「agent 自编辑」范式）。
  *
- * agent 在 ReAct 循环里自己决定记什么、查什么，写进 agent_memory.db 的 memory_items（FTS 关键词检索）。
+ * agent 在 ReAct 循环里自己决定记什么、查什么，写进 cachePath/memory-bank 的 Markdown 文件。
  * 只存稳定的「用户画像 profile」与「长期事实 fact」，带 importance；高重要度的会在下次开场注入系统提示。
- * 复用 memoryDatabase 现成读写层——子进程经 ConfigService + better-sqlite3 直连 app 派生库（同 messageVectorService）。
  * 故意只挂在主 Agent（buildTools），子 Agent（delegate）不带，避免子任务乱写记忆。
  */
-import { tool, generateObject } from 'ai'
+import { tool, generateObject, generateText } from 'ai'
 import { z } from 'zod'
 import type { AgentScope, AgentProviderConfig } from '../types'
 import type { MemoryItem, MemorySourceType } from '../../memory/memorySchema'
-import { memoryDatabase, hashMemoryContent } from '../../memory/memoryDatabase'
+import { AI_USER_PROFILE_UID, ONBOARDING_PROFILE_UIDS, memoryDatabase, hashMemoryContent } from '../../memory/memoryDatabase'
 import { createLanguageModel } from '../provider'
 import { invalidateMemoryCache } from '../runtimeCache'
-import { embedQuery, embedTexts, getEmbeddingConfig, type EmbeddingConfig } from '../../ai/embeddingService'
 import { rerankCandidates, type RerankMeta } from '../../ai/rerankService'
-import { reciprocalRankFusion } from '../../retrieval/rrf'
 
 /** 开场注入的画像/会话事实条数上限；先取 SCAN_LIMIT 再按 importance 排序截断。 */
 const STARTUP_MEMORY_ITEM_LIMIT = 40
@@ -37,71 +34,35 @@ function resolveAbout(about: string | undefined, scope: AgentScope): string | nu
   return null
 }
 
-/** recall 走语义检索的两类记忆。 */
-const VECTOR_KINDS: Array<'profile' | 'fact' | 'relationship'> = ['profile', 'fact', 'relationship']
-type RecallMode = 'keyword' | 'hybrid'
-type RecallMatchedBy = 'keyword' | 'vector' | 'both'
-
-function isEmbeddingReady(cfg: EmbeddingConfig): boolean {
-  return !!(cfg.enabled && cfg.apiKey && cfg.model)
-}
-
-/** 懒构建：给缺向量 / 内容已变 / 维度不符的记忆补嵌入（限定 scope 与 recall 一致）。失败由调用方兜底回退关键词。 */
-async function ensureMemoryVectors(cfg: EmbeddingConfig, sessionId: string | null): Promise<void> {
-  const items = memoryDatabase
-    .listMemoryItems({ ...(sessionId ? { sessionId } : {}), limit: 1000 })
-    .filter((m) => m.sourceType === 'profile' || m.sourceType === 'fact')
-  if (items.length === 0) return
-  const meta = memoryDatabase.getVectorMeta(cfg.model)
-  const stale = items.filter((m) => {
-    const v = meta.get(m.id)
-    return !v || v.contentHash !== m.contentHash || (cfg.dimension > 0 && v.dim !== cfg.dimension)
-  })
-  if (stale.length === 0) return
-  const BATCH = 64
-  for (let i = 0; i < stale.length; i += BATCH) {
-    const batch = stale.slice(i, i + BATCH)
-    const vectors = await embedTexts(batch.map((m) => m.content), cfg)
-    batch.forEach((m, idx) => {
-      const vec = vectors[idx]
-      if (!vec || vec.length === 0) return
-      memoryDatabase.upsertMemoryVector(m.id, cfg.model, vec.length, m.contentHash, Buffer.from(Float32Array.from(vec).buffer))
-    })
-  }
-}
-
-function recallMatchedBy(item: MemoryItem, keywordIds: Set<number>, vectorIds: Set<number>): RecallMatchedBy {
-  const keyword = keywordIds.has(item.id)
-  const vector = vectorIds.has(item.id)
-  if (keyword && vector) return 'both'
-  return vector ? 'vector' : 'keyword'
-}
+const MEMORY_KINDS: Array<'profile' | 'fact' | 'relationship'> = ['profile', 'fact', 'relationship']
+type RecallMode = 'markdown'
+type RecallMatchedBy = 'keyword'
 
 function formatRecall(
   items: MemoryItem[],
   mode: RecallMode,
   opts: {
-    embeddingReady: boolean
     fallbackReason?: string
     keywordIds?: Set<number>
-    vectorIds?: Set<number>
     keywordCount?: number
-    vectorCount?: number
     rerank?: RerankMeta
+    markdownContext?: ReturnType<typeof memoryDatabase.retrieveMarkdownContext>
   },
 ) {
   const keywordIds = opts.keywordIds || new Set<number>()
-  const vectorIds = opts.vectorIds || new Set<number>()
   return {
     mode,
     retrieval: {
       mode,
-      embeddingReady: opts.embeddingReady,
+      embeddingReady: false,
       fallbackReason: opts.fallbackReason,
       keywordCount: opts.keywordCount ?? keywordIds.size,
-      vectorCount: opts.vectorCount ?? vectorIds.size,
+      vectorCount: 0,
       rerank: opts.rerank,
+      markdownMode: opts.markdownContext?.mode,
+      sourceFiles: opts.markdownContext?.sourceFiles,
     },
+    context: opts.markdownContext?.context || '',
     count: items.length,
     memories: items.map((m) => ({
       id: m.id,
@@ -110,7 +71,7 @@ function formatRecall(
       about: m.sessionId,
       importance: m.importance,
       tags: m.tags,
-      matchedBy: recallMatchedBy(m, keywordIds, vectorIds),
+      matchedBy: 'keyword' as RecallMatchedBy,
     })),
   }
 }
@@ -175,6 +136,7 @@ export function createRemember(scope: AgentScope) {
           importance,
           tags: nextTags,
         })
+        memoryDatabase.appendBookmark(`Agent 主动保存记忆：${text.slice(0, 120)}`)
         invalidateMemoryCache(sessionId ? { kind: 'session', sessionId } : { kind: 'global' })
         return { remembered: true, id: item.id, kind: item.sourceType, importance: item.importance, about: sessionId || 'global' }
       } catch (e) {
@@ -196,53 +158,11 @@ export function createRecall(scope: AgentScope) {
     execute: async ({ query, about, limit }) => {
       try {
         const sessionId = resolveAbout(about, scope)
+        const markdownContext = memoryDatabase.retrieveMarkdownContext(query, { ...(sessionId ? { sessionId } : {}), limit })
         const candidateLimit = Math.min(50, Math.max(limit, limit * 3))
-        const filter = { ...(sessionId ? { sessionId } : {}), sourceTypes: VECTOR_KINDS }
-        // 关键词路：始终算（也作为向量不可用时的回退）
+        const filter = { ...(sessionId ? { sessionId } : {}), sourceTypes: MEMORY_KINDS }
         const keywordHits = memoryDatabase.searchMemoryItemsByKeyword({ query, ...filter, limit: candidateLimit })
         const keywordIds = new Set(keywordHits.map((h) => h.item.id))
-
-        const cfg = getEmbeddingConfig()
-        const embeddingReady = isEmbeddingReady(cfg)
-        let fallbackReason = embeddingReady ? 'vector_no_hits' : 'embedding_not_ready'
-        if (embeddingReady) {
-          try {
-            await ensureMemoryVectors(cfg, sessionId)
-            const queryVec = await embedQuery(query, cfg)
-            const vectorHits = memoryDatabase.searchMemoryVectors(queryVec, cfg.model, { ...filter, limit: candidateLimit })
-            const vectorIds = new Set(vectorHits.map((h) => h.item.id))
-            if (vectorHits.length > 0) {
-              // 向量 + 关键词按排名 RRF 融合（key=记忆 id）
-              const merged = reciprocalRankFusion<MemoryItem>(
-                [
-                  vectorHits.map((h, i) => ({ item: h.item, rank: i + 1 })),
-                  keywordHits.map((h, i) => ({ item: h.item, rank: i + 1 })),
-                ],
-                (item) => String(item.id),
-              )
-              const mergedItems = merged.slice(0, candidateLimit).map((m) => m.item)
-              const { items, meta: rerankMeta } = await rerankCandidates(
-                query,
-                mergedItems.map((item) => ({
-                  item,
-                  text: [item.title, item.content, item.tags?.join(' ')].filter(Boolean).join('\n'),
-                })),
-                { topN: limit },
-              )
-              return formatRecall(items, 'hybrid', {
-                embeddingReady,
-                keywordIds,
-                vectorIds,
-                keywordCount: keywordHits.length,
-                vectorCount: vectorHits.length,
-                rerank: rerankMeta,
-              })
-            }
-          } catch {
-            /* 向量任一步失败（未建/API 错）→ 落回关键词 */
-            fallbackReason = 'vector_error'
-          }
-        }
         const keywordItems = keywordHits.slice(0, candidateLimit).map((h) => h.item)
         const { items, meta: rerankMeta } = await rerankCandidates(
           query,
@@ -252,14 +172,12 @@ export function createRecall(scope: AgentScope) {
           })),
           { topN: limit },
         )
-        return formatRecall(items, 'keyword', {
-          embeddingReady,
-          fallbackReason,
+        return formatRecall(items, 'markdown', {
+          fallbackReason: keywordHits.length === 0 ? 'no_keyword_hits' : undefined,
           keywordIds,
-          vectorIds: new Set<number>(),
           keywordCount: keywordHits.length,
-          vectorCount: 0,
           rerank: rerankMeta,
+          markdownContext,
         })
       } catch (e) {
         return { error: e instanceof Error ? e.message : String(e) }
@@ -326,18 +244,12 @@ export function createForget() {
 export function createConsolidate() {
   return tool({
     description:
-      '整理记忆：按"关于谁 × 类型"分组，每组只保留最重要的若干条，删掉低价值冗余，防止记忆库越积越乱。' +
+      '整理 Markdown 记忆：按"关于谁 × 类型"分组，每组只保留最重要的若干条，删掉低价值冗余，防止记忆库越积越乱。' +
       '记了很多条、或用户让你"整理一下记忆"时调用。',
     inputSchema: z.object({}),
     execute: async () => {
       try {
-        const cfg = getEmbeddingConfig()
-        const semantic = isEmbeddingReady(cfg) ? { modelId: cfg.model } : undefined
-        // 先尽量补全向量，让语义去重覆盖更全（失败/未配嵌入就用已有向量或只做超量淘汰）
-        if (semantic) {
-          try { await ensureMemoryVectors(cfg, null) } catch { /* 建不了就用已有向量 */ }
-        }
-        const result = memoryDatabase.consolidate(50, semantic)
+        const result = memoryDatabase.consolidate(50)
         invalidateMemoryCache()
         return result
       } catch (e) {
@@ -350,6 +262,7 @@ export function createConsolidate() {
 /** 读高重要度长期记忆拼成启动摘要；无记忆返回空串，读失败不影响 agent。 */
 export async function buildMemoryContext(scope: AgentScope): Promise<string> {
   try {
+    const wakeup = memoryDatabase.readWakeupContext(scope)
     const globalProfiles = memoryDatabase.listMemoryItems({
       sourceTypes: ['profile'],
       minConfidence: STARTUP_MEMORY_MIN_CONFIDENCE,
@@ -373,9 +286,9 @@ export async function buildMemoryContext(scope: AgentScope): Promise<string> {
         }).filter((m) => !m.sessionId)
 
     const lines = limitMemoryLines(rankContextMemories([...globalProfiles, ...scoped]))
-    if (lines.length === 0) return ''
+    if (lines.length === 0) return wakeup
 
-    return `\n\n# 启动记忆摘要\n这些是经过筛选的高置信长期记忆，只作为上下文参考；若与当前对话冲突，以当前对话为准。每条保留 id/type/confidence/about，细节不足时用 recall 检索。\n${lines.join('\n')}`
+    return `${wakeup}\n\n# 启动记忆摘要\n这些是经过筛选的高置信长期记忆，只作为上下文参考；若与当前对话冲突，以当前对话为准。每条保留 id/type/confidence/about，细节不足时用 recall 检索。\n${lines.join('\n')}`
   } catch {
     return ''
   }
@@ -386,6 +299,10 @@ export async function preloadRelevantMemories(query: string, scope: AgentScope):
   const text = query.trim()
   if (text.length < 2) return ''
   try {
+    const markdown = memoryDatabase.retrieveMarkdownContext(text, {
+      ...(scope.kind === 'session' ? { sessionId: scope.sessionId } : {}),
+      limit: PRELOAD_MEMORY_LIMIT,
+    })
     const hits = memoryDatabase.searchMemoryItemsByKeyword({
       query: text,
       sourceTypes: CONTEXT_SOURCE_TYPES,
@@ -402,10 +319,194 @@ export async function preloadRelevantMemories(query: string, scope: AgentScope):
       seen.add(m.id)
       return true
     }).slice(0, PRELOAD_MEMORY_LIMIT)
-    if (items.length === 0) return ''
-    return `\n\n# 本轮相关记忆\n以下记忆与用户当前问题可能相关；仍需以当前对话与工具查询结果为准。\n${items.map(formatMemoryLine).join('\n')}`
+    const itemContext = items.length > 0
+      ? `\n\n# 本轮相关记忆\n以下记忆与用户当前问题可能相关；仍需以当前对话与工具查询结果为准。\n${items.map(formatMemoryLine).join('\n')}`
+      : ''
+    const fileContext = markdown.context
+      ? `\n\n# 本轮文件记忆（${markdown.mode}）\n${markdown.context.slice(0, 12_000)}`
+      : ''
+    return `${itemContext}${fileContext}`
   } catch {
     return ''
+  }
+}
+
+export async function afterTurnMemory(opts: {
+  scope: AgentScope
+  providerConfig: AgentProviderConfig
+  userText: string
+  assistantText: string
+  signal?: AbortSignal
+}): Promise<AutoMemoryResult[]> {
+  const { scope, providerConfig, userText, assistantText, signal } = opts
+  memoryDatabase.appendConversationTurn(userText, assistantText)
+  const auto = await extractMemories({ scope, providerConfig, userText, assistantText, signal })
+  await maybeRunDailyConsolidation(providerConfig, signal)
+  return auto
+}
+
+export type OnboardingProfileBuildResult = {
+  built: boolean
+  itemId?: number
+  reason?: string
+}
+
+export async function buildOnboardingUserProfileMemory(providerConfig: AgentProviderConfig, signal?: AbortSignal): Promise<OnboardingProfileBuildResult> {
+  const onboardingItems = ONBOARDING_PROFILE_UIDS
+    .map((uid) => memoryDatabase.getMemoryItemByUid(uid))
+    .filter((item): item is MemoryItem => Boolean(item))
+  if (onboardingItems.length === 0) return { built: false, reason: 'no_onboarding_memory' }
+
+  const source = onboardingItems
+    .map((item) => `- ${item.title || item.memoryUid}：${item.content}`)
+    .join('\n')
+  const previous = memoryDatabase.getMemoryItemByUid(AI_USER_PROFILE_UID)
+  const previousProfile = previous?.content.trim()
+    ? `\n\n已有画像草稿（如有冲突，以最新回答为准）：\n${previous.content.slice(0, 8000)}`
+    : ''
+
+  const result = await generateText({
+    model: createLanguageModel(providerConfig),
+    abortSignal: signal,
+    temperature: 0.2,
+    system:
+      '你是 CipherTalk 的用户长期记忆画像整理器。只根据给定资料更新用户档案，不编造、不扩写没有证据的内容。' +
+      '输出中文 Markdown，第一行必须是「# 用户档案」。只输出档案正文，不要解释。',
+    prompt: [
+      '根据下面的首次记忆引导回答，整理成长期可用的用户画像。',
+      '',
+      '格式要求：',
+      '- 必须包含这些二级标题：## 基本信息、## 日常状态、## 性格与应对、## 交互偏好。',
+      '- 每个标题下用 1-3 条项目符号。',
+      '- 写法参考“名字：……（首次对话中主动告知）。”这种清晰句式。',
+      '- 不要输出事实表、当前状态、其他画像线索，这些会由系统自动追加。',
+      '- 缺失的信息不要猜，可以写“暂未明确”。',
+      '',
+      `首次记忆引导回答：\n${source}${previousProfile}`
+    ].join('\n')
+  })
+
+  const content = result.text.trim()
+  if (!content || !content.includes('## 基本信息')) return { built: false, reason: 'invalid_ai_profile' }
+  const item = memoryDatabase.upsertMemoryItem({
+    memoryUid: AI_USER_PROFILE_UID,
+    sourceType: 'profile',
+    title: 'AI 用户画像',
+    content,
+    importance: 0.95,
+    confidence: 0.9,
+    tags: ['onboarding', 'ai-profile', 'profile']
+  })
+  memoryDatabase.appendBookmark('AI 构建首次用户画像')
+  invalidateMemoryCache({ kind: 'global' })
+  return { built: true, itemId: item.id }
+}
+
+export async function maybeRunDailyConsolidation(
+  providerConfig: AgentProviderConfig,
+  signal?: AbortSignal,
+  extraSource: { unreadMessages?: string } = {}
+): Promise<void> {
+  const date = memoryDatabase.getDailyConsolidationTarget()
+  if (!date) return
+  await runDailyDiaryConsolidation(date, providerConfig, signal, extraSource)
+}
+
+export async function runDailyDiaryConsolidation(
+  date: string,
+  providerConfig: AgentProviderConfig,
+  signal?: AbortSignal,
+  extraSource: { unreadMessages?: string } = {}
+): Promise<void> {
+  const source = memoryDatabase.readDailyConsolidationSource(date)
+  const unreadMessages = String(extraSource.unreadMessages || '').trim()
+  if (!source.conversations.trim() && !source.bookmarks.trim() && !unreadMessages) {
+    memoryDatabase.writeDiary(date, [
+      `# ${date} 日记`,
+      '',
+      '今天没有留下太多可写的痕迹。',
+      '',
+      '有时候空白也算一天的一部分。没有新的对话，没有值得惊动记忆的事，只是在纸页上轻轻留下一行：今天暂时安静。',
+      '',
+      '## 记忆线索',
+      '- 状态：无新增。',
+      ''
+    ].join('\n'))
+    return
+  }
+  try {
+    const result = await generateText({
+      model: createLanguageModel(providerConfig),
+      abortSignal: signal,
+      system:
+        '你是 CipherTalk 的长期记忆日记作者。你写的日记同时给用户和 AI 自己看：用户读起来要觉得被认真理解，AI 下次醒来要能快速找回事实、状态、偏好和待跟进事项。' +
+        '只根据给定对话、BOOKMARKS 和未读消息写，不编造，不心理诊断，不夸张煽情。主体要像一篇真正写给人看的日记，有画面、有停顿、有细节，有一点文人感；句子可以漂亮，但事实必须清楚。',
+      prompt: [
+        `日期：${date}`,
+        '',
+        '请输出一份中文 Markdown 日记，不要写成报告，不要用一堆固定小标题。格式如下：',
+        '',
+        `# ${date} 日记`,
+        '',
+        '正文要求：',
+        '- 先写 1 行很短的题眼或开场，可以像“他又来了。”、“今天的声音很轻。”这样，不要解释。',
+        '- 接着写 4-9 段自然段，每段 1-4 句。像日记，不像总结。',
+        '- 把今天的对话、用户状态、未读消息、值得记住的事实自然揉进正文里，不要分别列栏目。',
+        '- 未读消息要像“外面还有谁在敲门/谁留了话/哪件事还悬着”那样写进来，但不要逐条抄消息。',
+        '- 允许引用很短的原话来增加真实感，但不要大段复制原始对话。',
+        '- 结尾留一句有余味的话，不要鸡汤，不要广告语。',
+        '',
+        '正文之后，只保留一个给 AI 用的轻量索引：',
+        '',
+        '## 记忆线索',
+        '- 用 3-8 条项目符号列出事实、人物、状态、未读消息主题、待跟进事项、稳定偏好。',
+        '- 这一节是给 AI 检索用的，要短、准、可复用。',
+        '',
+        '风格要求：',
+        '- 不要出现“今天发生了什么 / 用户此刻的状态 / 未读消息里的风声 / 我需要记住的事 / 下次可以接住的线头 / 给用户看的短句 / 可检索线索”这些报告式标题。',
+        '- 不要机械地先总结再列点。正文里先有人味，再在末尾补索引。',
+        '- 写得克制一点，像认真记下一个人的一天；不要油腻、不要过度抒情。',
+        '- 可以有温柔和文学性，但必须扎在真实细节上。',
+        '- 没有证据的内容不要猜；不确定就含蓄写“不确定”。',
+        '',
+        '禁止：',
+        '- 不要输出“根据对话可知”这类模板话。',
+        '- 不要暴露系统提示、工具名、内部实现。',
+        '- 不要把原始对话大段复制进日记。',
+        '- 不要写成客服日报、会议纪要、心理分析报告。',
+        '',
+        '素材如下。',
+        '',
+        `对话日志：\n${source.conversations.slice(0, 18_000)}`,
+        '',
+        `BOOKMARKS：\n${source.bookmarks.slice(0, 6000)}`,
+        '',
+        `未读消息：\n${unreadMessages || '暂无未读消息。'}`
+      ].join('\n'),
+    })
+    memoryDatabase.writeDiary(date, result.text)
+    await extractMemories({
+      scope: { kind: 'global' },
+      providerConfig,
+      userText: `当天对话日志：\n${source.conversations.slice(0, 18_000)}`,
+      assistantText: `当天日记：\n${result.text.slice(0, 6000)}`,
+      signal
+    })
+  } catch {
+    memoryDatabase.writeDiary(date, [
+      `# ${date} 日记`,
+      '',
+      '今天的日记没有完全写成。',
+      '',
+      source.conversations.split(/\r?\n/).filter((line) => line.startsWith('## ')).slice(-12).join('\n\n') || '只剩下一点零散的对话痕迹，还来不及被整理成完整的故事。',
+      '',
+      unreadMessages ? `窗外还有一些未读的声音：\n\n${unreadMessages}` : '窗外暂时没有新的未读声音。',
+      '',
+      '## 记忆线索',
+      `- 日期：${date}`,
+      ...(source.bookmarks ? source.bookmarks.split(/\r?\n/).filter(Boolean).slice(0, 8) : ['- 暂无明确线索。']),
+      ''
+    ].join('\n'))
   }
 }
 
@@ -487,6 +588,7 @@ export async function extractMemories(opts: {
         confidence,
         tags,
       })
+      memoryDatabase.appendBookmark(`AI 自动记忆：${content.slice(0, 120)}`)
       invalidateMemoryCache(m.kind === 'profile' ? { kind: 'global' } : scope)
       out.push({ id: item.id, content, kind: m.kind, importance: item.importance })
     }

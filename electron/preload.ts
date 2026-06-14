@@ -98,6 +98,31 @@ contextBridge.exposeInMainWorld('electronAPI', {
     activate: () => ipcRenderer.send('notify:activate'),
   },
 
+  // 设备连接（微信 iLink 直连）
+  deviceConnect: {
+    wechat: {
+      getStatus: () => ipcRenderer.invoke('deviceConnect:wechat:getStatus') as Promise<{ status: 'disconnected' | 'connecting' | 'connected' | 'error'; botId: string | null; userId: string | null; error: string | null }>,
+      connect: () => ipcRenderer.invoke('deviceConnect:wechat:connect') as Promise<{ success: boolean; qrcodeImage?: string; error?: string }>,
+      cancel: () => ipcRenderer.invoke('deviceConnect:wechat:cancel') as Promise<{ success: boolean }>,
+      disconnect: () => ipcRenderer.invoke('deviceConnect:wechat:disconnect') as Promise<{ success: boolean }>,
+      onStatus: (callback: (payload: { status: 'disconnected' | 'connecting' | 'connected' | 'error'; botId: string | null; userId: string | null; error: string | null }) => void) => {
+        const listener = (_: any, payload: any) => callback(payload)
+        ipcRenderer.on('deviceConnect:wechat:status', listener)
+        return () => { ipcRenderer.removeListener('deviceConnect:wechat:status', listener) }
+      },
+      onQrcode: (callback: (payload: { qrcodeImage: string }) => void) => {
+        const listener = (_: any, payload: any) => callback(payload)
+        ipcRenderer.on('deviceConnect:wechat:qrcode', listener)
+        return () => { ipcRenderer.removeListener('deviceConnect:wechat:qrcode', listener) }
+      },
+      onScanState: (callback: (payload: { state: 'scaned' | 'failed'; error?: string }) => void) => {
+        const listener = (_: any, payload: any) => callback(payload)
+        ipcRenderer.on('deviceConnect:wechat:scanState', listener)
+        return () => { ipcRenderer.removeListener('deviceConnect:wechat:scanState', listener) }
+      },
+    },
+  },
+
   accounts: {
     list: () => ipcRenderer.invoke('accounts:list') as Promise<AccountProfile[]>,
     getActive: () => ipcRenderer.invoke('accounts:getActive') as Promise<AccountProfile | null>,
@@ -207,8 +232,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
   },
 
-  // AI 长期记忆管理（agent_memory.db）
+  // AI 长期记忆管理（cachePath/memory-bank）
   memory: {
+    migrationStatus: () =>
+      ipcRenderer.invoke('memory:migrationStatus') as Promise<{ success: boolean; status?: unknown; error?: string }>,
+    migrateLegacy: () =>
+      ipcRenderer.invoke('memory:migrateLegacy') as Promise<{ success: boolean; result?: unknown; error?: string }>,
     list: (opts?: {
       sourceType?: 'profile' | 'fact' | 'relationship'
       sourceTypes?: Array<'profile' | 'fact' | 'relationship'>
@@ -219,6 +248,24 @@ contextBridge.exposeInMainWorld('electronAPI', {
       limit?: number
     }) =>
       ipcRenderer.invoke('memory:list', opts) as Promise<{ success: boolean; items?: unknown[]; stats?: { itemCount: number }; error?: string }>,
+    listDiaries: (limit?: number) =>
+      ipcRenderer.invoke('memory:listDiaries', limit) as Promise<{ success: boolean; diaries?: unknown[]; error?: string }>,
+    readDiary: (date: string) =>
+      ipcRenderer.invoke('memory:readDiary', date) as Promise<{ success: boolean; diary?: unknown; error?: string }>,
+    deleteDiary: (date: string) =>
+      ipcRenderer.invoke('memory:deleteDiary', date) as Promise<{ success: boolean; error?: string }>,
+    summarizeTodayDiary: () =>
+      ipcRenderer.invoke('memory:summarizeTodayDiary') as Promise<{ success: boolean; alreadyExists?: boolean; diary?: unknown; error?: string }>,
+    create: (payload: {
+      memoryUid?: string
+      sourceType?: 'profile' | 'fact' | 'relationship'
+      content?: string
+      title?: string
+      importance?: number
+      confidence?: number
+      tags?: string[]
+    }) =>
+      ipcRenderer.invoke('memory:create', payload) as Promise<{ success: boolean; item?: unknown; error?: string }>,
     delete: (id: number) =>
       ipcRenderer.invoke('memory:delete', id) as Promise<{ success: boolean; error?: string }>,
     update: (payload: { id: number; sourceType?: 'profile' | 'fact' | 'relationship'; content?: string; importance?: number; confidence?: number; tags?: string[] }) =>
@@ -236,19 +283,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     test: (cfg: unknown) => ipcRenderer.invoke('embedding:test', cfg) as Promise<{ success: boolean; dimension?: number; error?: string }>,
     sessionStatus: (sessionId: string) => ipcRenderer.invoke('embedding:sessionStatus', sessionId) as Promise<{ success: boolean; enabled?: boolean; count?: number; store?: unknown; error?: string }>,
     buildSession: (sessionId: string) => ipcRenderer.invoke('embedding:buildSession', sessionId) as Promise<{ success: boolean; indexed?: number; error?: string }>,
-    agentResourceStatus: (kind: 'skill' | 'mcp_tool') =>
-      ipcRenderer.invoke('embedding:agentResourceStatus', kind) as Promise<{ success: boolean; status?: unknown; error?: string }>,
-    buildAgentResources: (kind: 'skill' | 'mcp_tool') =>
-      ipcRenderer.invoke('embedding:buildAgentResources', kind) as Promise<{ success: boolean; indexed?: number; error?: string }>,
     onBuildProgress: (callback: (progress: unknown) => void): (() => void) => {
       const listener = (_e: unknown, progress: unknown) => callback(progress)
       ipcRenderer.on('embedding:buildProgress', listener)
       return () => ipcRenderer.removeListener('embedding:buildProgress', listener)
-    },
-    onAgentResourceBuildProgress: (callback: (progress: unknown) => void): (() => void) => {
-      const listener = (_e: unknown, progress: unknown) => callback(progress)
-      ipcRenderer.on('embedding:agentResourceBuildProgress', listener)
-      return () => ipcRenderer.removeListener('embedding:agentResourceBuildProgress', listener)
     },
   },
 
@@ -624,6 +662,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('export:exportContacts', outputDir, options),
     exportMoments: (outputDir: string, options: any) =>
       ipcRenderer.invoke('export:exportMoments', outputDir, options),
+    scanDatabases: () =>
+      ipcRenderer.invoke('export:scanDatabases'),
+    exportDatabases: (selectedPaths: string[], outputDir: string) =>
+      ipcRenderer.invoke('export:exportDatabases', selectedPaths, outputDir),
     onProgress: (callback: (data: any) => void) => {
       ipcRenderer.on('export:progress', (_, data) => callback(data))
       return () => ipcRenderer.removeAllListeners('export:progress')
