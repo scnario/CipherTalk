@@ -28,15 +28,23 @@ export interface WebSearchConfig {
   maxResults: number
 }
 
-export interface TtsConfig {
-  enabled: boolean
-  protocol: 'openai-speech' | 'openai-chat' | 'custom'
+export type TtsProviderId = 'xiaomi' | 'volcengine' | 'aliyun-qwen'
+export type TtsProtocol = 'xiaomi-mimo-tts' | 'volcengine-bidirectional' | 'aliyun-qwen-realtime'
+
+export interface TtsProviderConfig {
+  protocol: TtsProtocol
   apiKey: string
   baseURL: string
   model: string
   voice: string
   instructions: string
   speed: number
+}
+
+export interface TtsConfig extends TtsProviderConfig {
+  enabled: boolean
+  activeProvider: TtsProviderId
+  providers: Record<TtsProviderId, TtsProviderConfig>
 }
 
 export interface TtsSpeakResult {
@@ -48,8 +56,31 @@ export interface TtsSpeakResult {
   errorCode?: 'NOT_CONFIGURED' | 'SYNTHESIS_FAILED'
 }
 
+export interface TtsStreamEvent {
+  streamId: string
+  type: 'start' | 'chunk' | 'complete' | 'end' | 'error'
+  success?: boolean
+  audioBase64?: string
+  mimeType?: string
+  cached?: boolean
+  streamed?: boolean
+  format?: 'pcm16'
+  sampleRate?: number
+  channels?: number
+  error?: string
+  errorCode?: 'NOT_CONFIGURED' | 'SYNTHESIS_FAILED'
+}
+
+export interface TtsStreamResult extends TtsSpeakResult {
+  streamed?: boolean
+  streamFormat?: 'pcm16'
+  sampleRate?: number
+  channels?: number
+}
+
 export interface TtsSpeakOptions {
   config?: Partial<TtsConfig>
+  personaVoice?: PersonaTtsVoiceBindingInfo | null
 }
 
 export interface ImageGenConfig {
@@ -162,6 +193,8 @@ export interface MemoryMigrationStatusInfo {
 export interface MemoryMigrationResultInfo extends MemoryMigrationStatusInfo {
   success: boolean
   deletedFiles: string[]
+  deleteErrors?: string[]
+  skippedItemCount?: number
 }
 
 export interface MemoryDiaryEntryInfo {
@@ -191,6 +224,26 @@ export interface PersonaProfileInfo {
   sharedEvents: string[]
 }
 
+export interface PersonaTtsVoiceBindingInfo {
+  provider: 'volcengine' | 'xiaomi' | 'aliyun-qwen'
+  protocol: 'volcengine-bidirectional' | 'xiaomi-mimo-tts' | 'aliyun-qwen-realtime'
+  source: 'volcengine-voice-clone' | 'xiaomi-mimo-voice-clone' | 'aliyun-qwen-voice-clone'
+  baseURL: string
+  model: string
+  voice: string
+  displayName?: string
+  sampleCount?: number
+  sampleSeconds?: number
+  sampleBytes?: number
+  sampleMimeType?: string
+  sampleHash?: string
+  modelType?: number
+  fallbackMode?: boolean
+  fallbackReason?: string
+  createdAt: number
+  updatedAt: number
+}
+
 export interface PersonaRecordInfo {
   id: number
   accountId: string
@@ -203,6 +256,7 @@ export interface PersonaRecordInfo {
     friendMessageCount: number
     avgFriendMsgChars: number
     avgFriendBurst: number
+    voiceRatio?: number
     groupMessageCount?: number
     groupSessionCount?: number
   }
@@ -216,6 +270,7 @@ export interface PersonaRecordInfo {
     count: number
     contexts: string[]
   }>
+  ttsVoice: PersonaTtsVoiceBindingInfo | null
   corpusUntil: number
   modelProvider: string
   modelId: string
@@ -1169,6 +1224,8 @@ export interface ElectronAPI {
     get: (sessionId: string) => Promise<{ success: boolean; persona?: PersonaRecordInfo | null; error?: string }>
     list: () => Promise<{ success: boolean; personas?: PersonaRecordInfo[]; error?: string }>
     build: (payload: { sessionId: string; displayName?: string }) => Promise<{ success: boolean; persona?: PersonaRecordInfo; error?: string }>
+    cloneVoice: (payload: { sessionId: string; displayName?: string }) => Promise<{ success: boolean; persona?: PersonaRecordInfo; voice?: PersonaTtsVoiceBindingInfo; warning?: string; error?: string }>
+    exportVoiceSample: (payload: { sessionId: string; displayName?: string; outputPath: string }) => Promise<{ success: boolean; outputPath?: string; sampleCount?: number; sampleSeconds?: number; audioBytes?: number; error?: string }>
     delete: (sessionId: string) => Promise<{ success: boolean; error?: string }>
     refreshIfStale: (sessionId: string) => Promise<{ success: boolean; refreshed?: boolean; persona?: PersonaRecordInfo | null; error?: string }>
     reflect: (payload: { sessionId: string; conversationId: number }) => Promise<{ success: boolean; reflected?: boolean; error?: string }>
@@ -1215,6 +1272,8 @@ export interface ElectronAPI {
     setConfig: (patch: Partial<TtsConfig>) => Promise<{ success: boolean; config?: TtsConfig; error?: string }>
     test: (cfg: Partial<TtsConfig>) => Promise<TtsSpeakResult>
     speak: (text: string, options?: TtsSpeakOptions) => Promise<TtsSpeakResult>
+    stream?: (streamId: string, text: string, options: TtsSpeakOptions | undefined, callback: (event: TtsStreamEvent) => void) => Promise<TtsStreamResult>
+    cancelStream?: (streamId: string) => Promise<{ success: boolean }>
   }
   imageGen: {
     getConfig: () => Promise<{ success: boolean; config?: ImageGenConfig; available?: boolean; error?: string }>

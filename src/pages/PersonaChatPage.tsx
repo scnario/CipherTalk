@@ -4,7 +4,7 @@
  * 等待回复时头部只显示「对方正在输入…」，不暴露内部检索过程。
  * 历史挂 agent 会话存储（scope kind='persona'），打开恢复、每轮保存。
  */
-import { AlertCircle, Bot, Loader2, MessageSquareX, RefreshCw, Send, Square, Trash2 } from 'lucide-react'
+import { AlertCircle, Bot, CheckCircle, Loader2, MessageSquareX, Mic2, RefreshCw, Send, Square, Trash2 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation } from 'react-router-dom'
 import { useChat } from '@ai-sdk/react'
@@ -165,6 +165,13 @@ function PersonaAvatar({ name, avatarUrl, size }: { name: string; avatarUrl?: st
   )
 }
 
+function getPersonaVoiceLabel(persona: PersonaRecordInfo | null): string {
+  if (!persona?.ttsVoice) return ''
+  if (persona.ttsVoice.provider === 'xiaomi') return '专属小米音色'
+  if (persona.ttsVoice.provider === 'aliyun-qwen') return '专属通义音色'
+  return '专属豆包音色'
+}
+
 export default function PersonaChatPage() {
   const location = useLocation()
   const sessionId = useMemo(() => {
@@ -182,6 +189,8 @@ export default function PersonaChatPage() {
   const [conversationId, setConversationId] = useState<number | null>(null)
   const [input, setInput] = useState('')
   const [clearingConversations, setClearingConversations] = useState(false)
+  const [voiceCloning, setVoiceCloning] = useState(false)
+  const [voiceCloneStatus, setVoiceCloneStatus] = useState<{ ok: boolean; text: string } | null>(null)
   /** 删除确认弹窗：删除分身画像 / 删除对话记录 */
   const [confirmAction, setConfirmAction] = useState<'deletePersona' | 'clearConversations' | null>(null)
   /** 待发缓冲：真人不会秒回——发出的消息先挂着，停顿几秒没有新消息了才一起交给 AI 回一轮 */
@@ -228,6 +237,7 @@ export default function PersonaChatPage() {
       const res = await speakVoice(key, bubble.text, {
         awaitEnd: true,
         instructions: persona?.card.ttsInstructions,
+        personaVoice: persona?.ttsVoice,
       })
       if (voiceChainRef.current !== chain || res.stopped) return
       if (!res.ok) {
@@ -402,6 +412,30 @@ export default function PersonaChatPage() {
     setPhase('confirm')
   }
 
+  const handleCloneVoice = async () => {
+    if (voiceCloning || !persona) return
+    setVoiceCloning(true)
+    setVoiceCloneStatus({ ok: true, text: '正在复刻声音…' })
+    try {
+      const res = await window.electronAPI.persona.cloneVoice({ sessionId, displayName })
+      if (res.success && res.persona) {
+        setPersona(res.persona)
+        const providerText = res.voice?.provider === 'xiaomi'
+          ? '小米音色样本'
+          : res.voice?.provider === 'aliyun-qwen'
+            ? '通义音色'
+            : '豆包音色'
+        setVoiceCloneStatus({ ok: true, text: `已绑定专属${providerText}${res.warning ? `（${res.warning}）` : ''}` })
+      } else {
+        setVoiceCloneStatus({ ok: false, text: res.error || '声音复刻失败' })
+      }
+    } catch (e) {
+      setVoiceCloneStatus({ ok: false, text: e instanceof Error ? e.message : String(e) })
+    } finally {
+      setVoiceCloning(false)
+    }
+  }
+
   const handleClearConversations = async () => {
     if (busy || clearingConversations) return
     clearPending()
@@ -542,9 +576,25 @@ export default function PersonaChatPage() {
         <div className="min-w-0 flex-1">
           <div className="truncate text-sm font-semibold text-foreground">{headerTitle}</div>
           <div className="truncate text-xs text-muted">
-            数字分身{persona ? ` · 基于 ${persona.stats.friendMessageCount + (persona.stats.groupMessageCount || 0)} 条消息${persona.stats.groupMessageCount ? `（含群聊发言 ${persona.stats.groupMessageCount} 条）` : ''}` : ''}
+            数字分身{persona ? ` · 基于 ${persona.stats.friendMessageCount + (persona.stats.groupMessageCount || 0)} 条消息${persona.stats.groupMessageCount ? `（含群聊发言 ${persona.stats.groupMessageCount} 条）` : ''}${persona.ttsVoice ? ` · ${getPersonaVoiceLabel(persona)}` : ''}` : ''}
           </div>
         </div>
+        <Tooltip delay={0}>
+          <Tooltip.Trigger>
+            <Button
+              isIconOnly
+              size="sm"
+              variant={persona?.ttsVoice ? 'secondary' : 'ghost'}
+              aria-label={persona?.ttsVoice ? '重新克隆声音' : '克隆声音'}
+              isDisabled={busy || voiceCloning}
+              isPending={voiceCloning}
+              onPress={handleCloneVoice}
+            >
+              <Mic2 size={16} />
+            </Button>
+          </Tooltip.Trigger>
+          <Tooltip.Content>{persona?.ttsVoice ? '重新克隆声音' : '克隆声音'}</Tooltip.Content>
+        </Tooltip>
         <Tooltip delay={0}>
           <Tooltip.Trigger>
             <Button isIconOnly size="sm" variant="ghost" aria-label="重建画像" isDisabled={busy} onPress={() => setPhase('confirm')}>
@@ -578,6 +628,17 @@ export default function PersonaChatPage() {
           <Tooltip.Content>删除分身画像</Tooltip.Content>
         </Tooltip>
       </div>
+
+      {voiceCloneStatus && (
+        <div className={`mx-4 mt-3 flex items-start gap-2 rounded-lg px-3 py-2 text-xs ${
+          voiceCloneStatus.ok
+            ? 'bg-success-soft text-success-soft-foreground'
+            : 'bg-danger-soft text-danger-soft-foreground'
+        }`}>
+          {voiceCloneStatus.ok ? <CheckCircle size={14} className="mt-0.5 shrink-0" /> : <AlertCircle size={14} className="mt-0.5 shrink-0" />}
+          <span>{voiceCloneStatus.text}</span>
+        </div>
+      )}
 
       {/* 消息区 */}
       <div ref={scrollRef} className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-4 py-3">

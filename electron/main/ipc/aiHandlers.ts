@@ -4,10 +4,11 @@ import { join } from 'path'
 import type { UIMessage } from 'ai'
 import type { MainProcessContext } from '../context'
 import type { AgentProviderConfig, AgentProviderConfigOverride, AgentScope } from '../../services/agent/types'
-import type { PersonaNotes } from '../../services/agent/persona/personaTypes'
+import type { PersonaNotes, PersonaRecord, PersonaTtsVoiceBinding } from '../../services/agent/persona/personaTypes'
 
 /** 进行中的 agent 运行：runId → AbortController，用于取消。 */
 const agentAborters = new Map<string, AbortController>()
+const ttsStreamAborters = new Map<string, AbortController>()
 const AGENT_RUN_PROXY_CACHE_TTL_MS = 5 * 60 * 1000
 // 准备阶段重排超时：超时直接走降级路径（不影响正确性），别让慢服务拖住首包。
 const AGENT_PREP_RERANK_TIMEOUT_MS = 800
@@ -55,6 +56,20 @@ function lastUserTextFromUiMessages(messages: UIMessage[] = []): string {
 function localDateKey(date = new Date()): string {
   const pad = (value: number) => String(value).padStart(2, '0')
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+}
+
+function sanitizePersonaVoiceForRenderer(ttsVoice: PersonaTtsVoiceBinding | null | undefined): PersonaTtsVoiceBinding | null {
+  if (!ttsVoice) return null
+  const { samplePath: _samplePath, ...safeVoice } = ttsVoice
+  return safeVoice as PersonaTtsVoiceBinding
+}
+
+function sanitizePersonaForRenderer(persona: PersonaRecord | null | undefined): PersonaRecord | null {
+  if (!persona) return null
+  return {
+    ...persona,
+    ttsVoice: sanitizePersonaVoiceForRenderer(persona.ttsVoice),
+  }
 }
 
 function scopeToLogData(scope?: AgentScope): Record<string, unknown> {
@@ -658,13 +673,89 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
     }
   })
 
-  ipcMain.handle('tts:speak', async (_e, text: string, options?: { config?: Record<string, unknown> }) => {
+  ipcMain.handle('tts:speak', async (_e, text: string, options?: { config?: Record<string, unknown>; personaVoice?: unknown }) => {
     try {
-      const { synthesizeSpeech } = await import('../../services/ai/ttsService')
-      const config = options?.config && typeof options.config === 'object' ? options.config : undefined
+      const { resolvePersonaVoiceTtsConfig, synthesizeSpeech } = await import('../../services/ai/ttsService')
+      const configPatch = options?.config && typeof options.config === 'object' ? options.config : undefined
+      const config = options?.personaVoice && typeof options.personaVoice === 'object'
+        ? resolvePersonaVoiceTtsConfig(options.personaVoice as any, configPatch as any)
+        : configPatch
       return await synthesizeSpeech(String(text || ''), config ? { config: config as any, useCache: true } : undefined)
     } catch (e) {
       return { success: false, error: e instanceof Error ? e.message : String(e), errorCode: 'SYNTHESIS_FAILED' }
+    }
+  })
+
+  ipcMain.handle('tts:streamCancel', async (_e, streamId: string) => {
+    const id = String(streamId || '')
+    const controller = ttsStreamAborters.get(id)
+    if (controller) {
+      controller.abort()
+      ttsStreamAborters.delete(id)
+    }
+    return { success: true }
+  })
+
+  ipcMain.handle('tts:stream', async (event, streamId: string, text: string, options?: { config?: Record<string, unknown>; personaVoice?: unknown }) => {
+    const id = String(streamId || '')
+    const controller = new AbortController()
+    if (id) ttsStreamAborters.set(id, controller)
+
+    const sendEvent = (payload: Record<string, unknown>) => {
+      if (!id || event.sender.isDestroyed()) return
+      event.sender.send('tts:streamEvent', { streamId: id, ...payload })
+    }
+
+    try {
+      const { resolvePersonaVoiceTtsConfig, synthesizeSpeechStream } = await import('../../services/ai/ttsService')
+      const configPatch = options?.config && typeof options.config === 'object' ? options.config : undefined
+      const config = options?.personaVoice && typeof options.personaVoice === 'object'
+        ? resolvePersonaVoiceTtsConfig(options.personaVoice as any, configPatch as any)
+        : configPatch
+
+      sendEvent({ type: 'start' })
+      const result = await synthesizeSpeechStream(String(text || ''), {
+        config: config as any,
+        useCache: true,
+        signal: controller.signal,
+        onAudioChunk: (chunk) => {
+          sendEvent({
+            type: 'chunk',
+            audioBase64: Buffer.from(chunk.data).toString('base64'),
+            format: chunk.format,
+            sampleRate: chunk.sampleRate,
+            channels: chunk.channels,
+          })
+        },
+      })
+
+      if (result.success && !result.streamed && result.audioBase64) {
+        sendEvent({
+          type: 'complete',
+          audioBase64: result.audioBase64,
+          mimeType: result.mimeType,
+          cached: result.cached,
+        })
+      }
+      sendEvent({
+        type: result.success ? 'end' : 'error',
+        success: result.success,
+        error: result.error,
+        errorCode: result.errorCode,
+        streamed: result.streamed,
+        cached: result.cached,
+        mimeType: result.mimeType,
+      })
+
+      return result.streamed ? { ...result, audioBase64: undefined } : result
+    } catch (e) {
+      const error = e instanceof Error ? e.message : String(e)
+      sendEvent({ type: 'error', success: false, error, errorCode: 'SYNTHESIS_FAILED' })
+      return { success: false, error, errorCode: 'SYNTHESIS_FAILED' }
+    } finally {
+      if (id && ttsStreamAborters.get(id) === controller) {
+        ttsStreamAborters.delete(id)
+      }
     }
   })
 
@@ -1011,6 +1102,7 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
             profile: persona.profile,
             notes,
             stickers: persona.stickers,
+            ttsVoice: persona.ttsVoice,
           },
           messages,
         },
@@ -1039,7 +1131,7 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
   ipcMain.handle('persona:get', async (_event, sessionId: string) => {
     try {
       const { personaStore } = await import('../../services/agent/persona/personaStore')
-      return { success: true, persona: personaStore.get(String(sessionId || '').trim()) }
+      return { success: true, persona: sanitizePersonaForRenderer(personaStore.get(String(sessionId || '').trim())) }
     } catch (e) {
       return { success: false, error: e instanceof Error ? e.message : String(e) }
     }
@@ -1048,7 +1140,43 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
   ipcMain.handle('persona:list', async () => {
     try {
       const { personaStore } = await import('../../services/agent/persona/personaStore')
-      return { success: true, personas: personaStore.list() }
+      return { success: true, personas: personaStore.list().map((persona) => sanitizePersonaForRenderer(persona)) }
+    } catch (e) {
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  })
+
+  ipcMain.handle('persona:cloneVoice', async (_event, payload: { sessionId: string; displayName?: string }) => {
+    try {
+      const { refreshResolvedProxyUrl } = await import('../../services/ai/proxyFetch')
+      const { clonePersonaVoiceFromSession } = await import('../../services/agent/persona/personaVoiceCloneService')
+      await refreshResolvedProxyUrl()
+      const result = await clonePersonaVoiceFromSession({
+        sessionId: String(payload?.sessionId || '').trim(),
+        displayName: String(payload?.displayName || '').trim(),
+        logger: ctx.getLogService(),
+      })
+      if (!result.success) return result
+      return {
+        ...result,
+        persona: sanitizePersonaForRenderer(result.persona),
+        voice: sanitizePersonaVoiceForRenderer(result.voice),
+      }
+    } catch (e) {
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  })
+
+  ipcMain.handle('persona:exportVoiceSample', async (_event, payload: { sessionId: string; displayName?: string; outputPath: string }) => {
+    try {
+      const { exportPersonaVoiceSampleFromSession } = await import('../../services/agent/persona/personaVoiceCloneService')
+      return await exportPersonaVoiceSampleFromSession({
+        sessionId: String(payload?.sessionId || '').trim(),
+        displayName: String(payload?.displayName || '').trim(),
+        outputPath: String(payload?.outputPath || '').trim(),
+        minSeconds: 10,
+        logger: ctx.getLogService(),
+      })
     } catch (e) {
       return { success: false, error: e instanceof Error ? e.message : String(e) }
     }
@@ -1151,7 +1279,7 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
         freshFriendMessages: freshCorpus.stats.friendMessageCount,
         newFewShots: revised.newFewShots.length,
       })
-      return { success: true, refreshed: true, persona: updated }
+      return { success: true, refreshed: true, persona: sanitizePersonaForRenderer(updated) }
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
       logger?.error('Persona', '画像增量进化失败', { sessionId, ...errorToLogData(e) })
@@ -1248,7 +1376,7 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
     const displayName = String(payload?.displayName || '').trim() || sessionId
     const logger = ctx.getLogService()
     const { buildPersonaFromSession } = await import('../../services/agent/persona/personaBuildService')
-    return buildPersonaFromSession({
+    const result = await buildPersonaFromSession({
       sessionId,
       displayName,
       logger,
@@ -1256,6 +1384,10 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
         if (!sender.isDestroyed()) sender.send('persona:buildProgress', progress)
       },
     })
+    if (result.success && result.persona) {
+      return { ...result, persona: sanitizePersonaForRenderer(result.persona) }
+    }
+    return result
   })
 
   ipcMain.handle('agent:generateTitle', async (_event, payload: {

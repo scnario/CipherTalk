@@ -87,10 +87,36 @@ export interface PersonaStats {
   avgFriendMsgChars: number
   /** 对方平均一轮连发几条 */
   avgFriendBurst: number
+  /** 对方语音消息占比（语音数 / (文本+语音)，含未转写语音）；旧记录无此值，重建后才有 */
+  voiceRatio?: number
   /** 私聊语料不足时补充收集的群聊发言条数（仅喂风格卡/深层画像，不进问答对） */
   groupMessageCount?: number
   /** 群聊发言来自几个群 */
   groupSessionCount?: number
+}
+
+/** 数字分身绑定的专属 TTS 音色。密钥不落库，合成时读取全局服务商配置。 */
+export interface PersonaTtsVoiceBinding {
+  provider: 'volcengine' | 'xiaomi' | 'aliyun-qwen'
+  protocol: 'volcengine-bidirectional' | 'xiaomi-mimo-tts' | 'aliyun-qwen-realtime'
+  source: 'volcengine-voice-clone' | 'xiaomi-mimo-voice-clone' | 'aliyun-qwen-voice-clone'
+  baseURL: string
+  /** 豆包为 X-Api-Resource-Id；小米为 TTS voiceclone 模型 ID；通义为 target_model。 */
+  model: string
+  /** 豆包为 speaker_id；小米为本地样本 ID；通义为声音复刻返回的 voice。 */
+  voice: string
+  displayName?: string
+  sampleCount?: number
+  sampleSeconds?: number
+  sampleBytes?: number
+  sampleMimeType?: string
+  samplePath?: string
+  sampleHash?: string
+  modelType?: number
+  fallbackMode?: boolean
+  fallbackReason?: string
+  createdAt: number
+  updatedAt: number
 }
 
 export interface PersonaRecord {
@@ -105,6 +131,8 @@ export interface PersonaRecord {
   profile: PersonaProfile | null
   /** TA 常用的表情包词典（旧记录为空数组，重建后才有） */
   stickers: PersonaSticker[]
+  /** TA 的专属复刻音色；存在时分身语音优先使用它，不跟随全局当前 TTS 服务商。 */
+  ttsVoice: PersonaTtsVoiceBinding | null
   /** 已蒸馏到的消息时间水位（createTime 秒），增量进化用 */
   corpusUntil: number
   modelProvider: string
@@ -185,6 +213,8 @@ export interface PersonaChatPersona {
   notes?: PersonaNotes
   /** TA 常用的表情包词典；模型按编号点播，引擎换成真实表情包气泡 */
   stickers?: PersonaSticker[]
+  /** TA 的专属复刻音色；只影响语音气泡，不影响文本生成模型。 */
+  ttsVoice?: PersonaTtsVoiceBinding | null
 }
 
 /** 主进程 → AI 子进程的克隆聊天请求载荷。 */
