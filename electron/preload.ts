@@ -157,8 +157,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // AI Agent（主进程 broker → AI 子进程；流式 chunk 经 agent:chunk 推回）
   agent: {
-    run: (runId: string, messages: unknown[], scope?: unknown, modelConfig?: unknown, conversationId?: number | null, planMode?: boolean) =>
-      ipcRenderer.invoke('agent:run', { runId, messages, scope, modelConfig, conversationId, planMode }) as Promise<{ success: boolean; error?: string }>,
+    run: (runId: string, messages: unknown[], scope?: unknown, modelConfig?: unknown, conversationId?: number | null, planMode?: boolean, toolProfile?: unknown, codeWorkspace?: unknown) =>
+      ipcRenderer.invoke('agent:run', { runId, messages, scope, modelConfig, conversationId, planMode, toolProfile, codeWorkspace }) as Promise<{ success: boolean; error?: string }>,
     abort: (runId: string) => ipcRenderer.invoke('agent:abort', runId) as Promise<{ success: boolean }>,
     generateTitle: (firstMessage: string, modelConfig?: unknown) =>
       ipcRenderer.invoke('agent:generateTitle', { firstMessage, modelConfig }) as Promise<{ success: boolean; title?: string; error?: string }>,
@@ -191,6 +191,27 @@ contextBridge.exposeInMainWorld('electronAPI', {
       }
       ipcRenderer.on('agent:progress', listener)
       return () => ipcRenderer.removeListener('agent:progress', listener)
+    },
+  },
+
+  agentWorkspace: {
+    selectWorkspace: () => ipcRenderer.invoke('agentWorkspace:selectWorkspace') as Promise<{ success: boolean; canceled?: boolean; state?: unknown; error?: string }>,
+    clearWorkspace: () => ipcRenderer.invoke('agentWorkspace:clearWorkspace') as Promise<{ success: boolean; state?: unknown; error?: string }>,
+    stopDevServer: () => ipcRenderer.invoke('agentWorkspace:stopDevServer') as Promise<{ success: boolean; state?: unknown; result?: unknown; error?: string }>,
+    getState: () => ipcRenderer.invoke('agentWorkspace:getState') as Promise<{ success: boolean; state?: unknown; error?: string }>,
+    setApprovalPolicy: (policy: unknown) => ipcRenderer.invoke('agentWorkspace:setApprovalPolicy', policy) as Promise<{ success: boolean; state?: unknown; error?: string }>,
+    listFiles: (payload: unknown) => ipcRenderer.invoke('agentWorkspace:listFiles', payload) as Promise<{ success: boolean; root?: string; items?: unknown[]; truncated?: boolean; error?: string }>,
+    approve: (requestId: string) => ipcRenderer.invoke('agentWorkspace:approve', requestId) as Promise<{ success: boolean }>,
+    reject: (requestId: string, _reason?: string) => ipcRenderer.invoke('agentWorkspace:reject', requestId) as Promise<{ success: boolean }>,
+    onApprovalRequest: (callback: (request: unknown) => void): (() => void) => {
+      const listener = (_e: unknown, request: unknown) => callback(request)
+      ipcRenderer.on('agentWorkspace:approvalRequest', listener)
+      return () => ipcRenderer.removeListener('agentWorkspace:approvalRequest', listener)
+    },
+    onWorkspaceEvent: (callback: (event: unknown) => void): (() => void) => {
+      const listener = (_e: unknown, event: unknown) => callback(event)
+      ipcRenderer.on('agentWorkspace:event', listener)
+      return () => ipcRenderer.removeListener('agentWorkspace:event', listener)
     },
   },
 
@@ -243,8 +264,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     migrateLegacy: () =>
       ipcRenderer.invoke('memory:migrateLegacy') as Promise<{ success: boolean; result?: unknown; error?: string }>,
     list: (opts?: {
-      sourceType?: 'profile' | 'fact' | 'relationship'
-      sourceTypes?: Array<'profile' | 'fact' | 'relationship'>
+      sourceType?: string
+      sourceTypes?: string[]
       sessionId?: string
       tags?: string[]
       withoutTags?: string[]
@@ -262,7 +283,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('memory:summarizeTodayDiary') as Promise<{ success: boolean; alreadyExists?: boolean; diary?: unknown; error?: string }>,
     create: (payload: {
       memoryUid?: string
-      sourceType?: 'profile' | 'fact' | 'relationship'
+      sourceType?: string
       content?: string
       title?: string
       importance?: number
@@ -272,7 +293,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('memory:create', payload) as Promise<{ success: boolean; item?: unknown; error?: string }>,
     delete: (id: number) =>
       ipcRenderer.invoke('memory:delete', id) as Promise<{ success: boolean; error?: string }>,
-    update: (payload: { id: number; sourceType?: 'profile' | 'fact' | 'relationship'; content?: string; importance?: number; confidence?: number; tags?: string[] }) =>
+    update: (payload: { id: number; sourceType?: string; content?: string; importance?: number; confidence?: number; tags?: string[] }) =>
       ipcRenderer.invoke('memory:update', payload) as Promise<{ success: boolean; item?: unknown; error?: string }>,
     consolidate: () =>
       ipcRenderer.invoke('memory:consolidate') as Promise<{ success: boolean; result?: { removed: number; groups: number; scanned: number }; error?: string }>,

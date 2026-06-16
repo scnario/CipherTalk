@@ -3,7 +3,8 @@ import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import type { UIMessage } from 'ai'
 import type { MainProcessContext } from '../context'
-import type { AgentProviderConfig, AgentProviderConfigOverride, AgentScope } from '../../services/agent/types'
+import type { AgentProviderConfig, AgentProviderConfigOverride, AgentScope, AgentToolProfile } from '../../services/agent/types'
+import type { CodeWorkspaceRef } from '../../services/agent/codeWorkspaceTypes'
 import type { PersonaNotes, PersonaRecord, PersonaTtsVoiceBinding } from '../../services/agent/persona/personaTypes'
 
 /** 进行中的 agent 运行：runId → AbortController，用于取消。 */
@@ -189,6 +190,8 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
     modelConfig?: AgentProviderConfigOverride | null
     conversationId?: number | null
     planMode?: boolean
+    toolProfile?: AgentToolProfile
+    codeWorkspace?: CodeWorkspaceRef | null
   }) => {
     const sender = event.sender
     const { runId } = payload
@@ -198,12 +201,20 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
     const logger = ctx.getLogService()
     const startedAt = Date.now()
     const scope = payload.scope ?? { kind: 'global' as const }
+    const toolProfile: AgentToolProfile = payload.toolProfile === 'code' || payload.toolProfile === 'hybrid' || payload.toolProfile === 'chat'
+      ? payload.toolProfile
+      : payload.codeWorkspace ? 'hybrid' : 'chat'
+    const codeWorkspace = payload.codeWorkspace && typeof payload.codeWorkspace.root === 'string'
+      ? payload.codeWorkspace
+      : null
     const initialLastUserText = lastUserTextFromUiMessages(payload.messages || [])
     const baseRunData = {
       runId,
       conversationId: payload.conversationId ?? null,
       messageCount: payload.messages?.length ?? 0,
       lastUserTextLength: initialLastUserText.length,
+      toolProfile,
+      hasCodeWorkspace: Boolean(codeWorkspace),
       ...scopeToLogData(scope),
     }
     let stage = 'start'
@@ -423,7 +434,7 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
       let firstChunkSeen = false
       let firstModelOutputSeen = false
       await agentProcessService.run(
-        { messages, providerConfig, scope, mcpTools, skills, planMode: payload.planMode === true },
+        { messages, providerConfig, scope, mcpTools, skills, planMode: payload.planMode === true, toolProfile, codeWorkspace },
         (chunk) => {
           chunkCount += 1
           lastActivityAt = Date.now()
@@ -875,8 +886,8 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
   })
 
   ipcMain.handle('memory:list', async (_event, opts?: {
-    sourceType?: 'profile' | 'fact' | 'relationship'
-    sourceTypes?: Array<'profile' | 'fact' | 'relationship'>
+    sourceType?: string
+    sourceTypes?: string[]
     sessionId?: string
     tags?: string[]
     withoutTags?: string[]
@@ -885,9 +896,13 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
   }) => {
     try {
       const { memoryDatabase } = await import('../../services/memory/memoryDatabase')
+      const sourceType = String(opts?.sourceType || '').trim()
+      const sourceTypes = Array.isArray(opts?.sourceTypes)
+        ? opts.sourceTypes.map((type) => String(type || '').trim()).filter(Boolean)
+        : undefined
       const items = memoryDatabase.listMemoryItems({
-        ...(opts?.sourceType ? { sourceType: opts.sourceType } : {}),
-        ...(Array.isArray(opts?.sourceTypes) ? { sourceTypes: opts.sourceTypes } : {}),
+        ...(sourceType ? { sourceType: sourceType as any } : {}),
+        ...(sourceTypes ? { sourceTypes: sourceTypes as any } : {}),
         ...(opts?.sessionId ? { sessionId: opts.sessionId } : {}),
         ...(Array.isArray(opts?.tags) ? { tags: opts.tags } : {}),
         ...(Array.isArray(opts?.withoutTags) ? { withoutTags: opts.withoutTags } : {}),
@@ -945,8 +960,9 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
         import('../../services/agent/tools/memory'),
         import('../../services/memory/nightlyMemoryService')
       ])
+      const customPrompt = String(ctx.getConfigService()?.get('diaryCustomPrompt' as any) || '').trim()
       const unreadMessages = await readUnreadDiarySource().catch(() => '')
-      await runDailyDiaryConsolidation(date, resolveProviderConfig(), undefined, { unreadMessages })
+      await runDailyDiaryConsolidation(date, resolveProviderConfig(), undefined, { unreadMessages, customPrompt })
       const diary = memoryDatabase.readDiary(date)
       return diary ? { success: true, alreadyExists: false, diary } : { success: false, error: '日记生成后未找到文件' }
     } catch (e) {
@@ -956,7 +972,7 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
 
   ipcMain.handle('memory:create', async (_event, payload: {
     memoryUid?: string
-    sourceType?: 'profile' | 'fact' | 'relationship'
+    sourceType?: string
     content?: string
     title?: string
     importance?: number
@@ -967,11 +983,11 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
       const { memoryDatabase } = await import('../../services/memory/memoryDatabase')
       const content = String(payload?.content || '').trim()
       if (!content) return { success: false, error: '记忆内容不能为空' }
-      const sourceType = payload?.sourceType || 'profile'
+      const sourceType = String(payload?.sourceType || 'profile').trim()
       const memoryUid = String(payload?.memoryUid || `${sourceType}:${Date.now()}`).trim()
       const item = memoryDatabase.upsertMemoryItem({
         memoryUid,
-        sourceType,
+        sourceType: sourceType as any,
         title: String(payload?.title || content.slice(0, 40)),
         content,
         ...(payload?.importance !== undefined ? { importance: payload.importance } : {}),
@@ -995,7 +1011,7 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
 
   ipcMain.handle('memory:update', async (_event, payload: {
     id: number
-    sourceType?: 'profile' | 'fact' | 'relationship'
+    sourceType?: string
     content?: string
     importance?: number
     confidence?: number
@@ -1007,8 +1023,9 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
       if (!Number.isFinite(id)) return { success: false, error: '无效的记忆 id' }
       const content = String(payload?.content || '').trim()
       if (!content) return { success: false, error: '记忆内容不能为空' }
+      const sourceType = String(payload?.sourceType || '').trim()
       const item = memoryDatabase.updateMemoryItem(id, {
-        ...(payload.sourceType ? { sourceType: payload.sourceType } : {}),
+        ...(sourceType ? { sourceType: sourceType as any } : {}),
         title: content.slice(0, 40),
         content,
         ...(payload.importance !== undefined ? { importance: payload.importance } : {}),

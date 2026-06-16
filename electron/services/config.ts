@@ -22,6 +22,9 @@ const ACCOUNT_CONFIG_CLEAR_KEYS = [
   'imageAesKey'
 ] as const
 
+const IMAGE_GEN_DEFAULT_TIMEOUT_MS = 3_600_000
+const IMAGE_GEN_LEGACY_DEFAULT_TIMEOUT_MS = 600_000
+
 interface ConfigSchema {
   // 数据库相关
   dbPath: string
@@ -102,6 +105,10 @@ interface ConfigSchema {
   // 窗口关闭行为
   closeToTray: boolean
 
+  // 日记相关
+  diarySummaryHour: number
+  diaryCustomPrompt: string
+
   // 性能相关
   hardwareAccelerationEnabled: boolean
 
@@ -122,6 +129,8 @@ interface ConfigSchema {
       updatedAt: number
     }
   }
+  agentCodeWorkspaceRoot: string
+  agentCodeWorkspaceApprovalPolicy: 'on-request' | 'risk-based' | 'full-access'
   // 嵌入模型（语义/向量检索，独立于聊天模型）
   embeddingConfig: {
     enabled: boolean
@@ -193,7 +202,7 @@ interface ConfigSchema {
   // AI 作图 —— AI 助手 generate_image 工具用，独立于聊天模型
   imageGenConfig: {
     enabled: boolean
-    protocol: 'openai-compatible' | 'openai' | 'google'
+    protocol: 'openai-compatible' | 'openai' | 'google' | 'custom'
     apiKey: string
     baseURL: string
     model: string
@@ -279,12 +288,16 @@ const defaults: ConfigSchema = {
   httpApiToken: '',
   httpApiListenMode: 'localhost',
   closeToTray: true,  // 默认最小化到托盘
+  diarySummaryHour: 2,
+  diaryCustomPrompt: '',
   hardwareAccelerationEnabled: true,
   // AI 默认配置
   aiCurrentProvider: 'deepseek',
   aiActiveConfigPresetId: '',
   aiProviderConfigs: {},  // 空对象，用户配置后填充
   aiProviderModelCache: {},
+  agentCodeWorkspaceRoot: '',
+  agentCodeWorkspaceApprovalPolicy: 'on-request',
   embeddingConfig: {
     enabled: false,
     provider: '',
@@ -355,7 +368,7 @@ const defaults: ConfigSchema = {
     baseURL: 'https://api.siliconflow.cn/v1',
     model: 'Kwai-Kolors/Kolors',
     size: '1024x1024',
-    timeoutMs: 600000,
+    timeoutMs: IMAGE_GEN_DEFAULT_TIMEOUT_MS,
   },
   aiResolvedProxyUrl: '',
   petCurrent: '',
@@ -422,6 +435,23 @@ export class ConfigService {
       }
 
       this.migrateLegacySingleAccount()
+
+      // 迁移：作图旧默认超时 10 分钟过短，后台图已生成时 Agent 工具可能先报超时。
+      try {
+        const row = this.db.prepare("SELECT value FROM config WHERE key = 'imageGenConfig'").get() as { value: string } | undefined
+        if (row) {
+          const cfg = JSON.parse(row.value || '{}') as { timeoutMs?: unknown }
+          if (Number(cfg?.timeoutMs) === IMAGE_GEN_LEGACY_DEFAULT_TIMEOUT_MS) {
+            this.db.prepare("UPDATE config SET value = ? WHERE key = 'imageGenConfig'").run(JSON.stringify({
+              ...cfg,
+              timeoutMs: IMAGE_GEN_DEFAULT_TIMEOUT_MS,
+            }))
+            console.log('[Config] AI 作图默认超时已迁移到 1 小时')
+          }
+        }
+      } catch (e) {
+        console.error('迁移 AI 作图超时配置失败:', e)
+      }
 
       // 迁移：修复旧版本产生的空 STT 语言配置，默认为中文
       try {

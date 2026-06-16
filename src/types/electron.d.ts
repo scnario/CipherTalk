@@ -85,7 +85,7 @@ export interface TtsSpeakOptions {
 
 export interface ImageGenConfig {
   enabled: boolean
-  protocol: 'openai-compatible' | 'openai' | 'google'
+  protocol: 'openai-compatible' | 'openai' | 'google' | 'custom'
   apiKey: string
   baseURL: string
   model: string
@@ -158,6 +158,68 @@ export interface HttpApiStatusPayload {
   lastError: string
 }
 
+export type AgentToolProfile = 'chat' | 'code' | 'hybrid'
+export type CodeWorkspaceApprovalKind = 'write' | 'delete' | 'command' | 'dev-server' | 'sensitive-read'
+export type CodeWorkspaceApprovalRisk = 'low' | 'medium' | 'high'
+export type CodeWorkspaceApprovalDecision = 'approved' | 'rejected'
+export type CodeWorkspaceApprovalPolicy = 'on-request' | 'risk-based' | 'full-access'
+
+export interface CodeWorkspaceRef {
+  id: string
+  root: string
+  approvalPolicy: CodeWorkspaceApprovalPolicy
+}
+
+export interface CodeWorkspaceDevServerState {
+  running: boolean
+  command?: string
+  pid?: number
+  startedAt?: number
+  previewUrl?: string
+}
+
+export interface CodeWorkspaceState {
+  workspace: CodeWorkspaceRef | null
+  devServer: CodeWorkspaceDevServerState
+  recentLogs: string[]
+}
+
+export interface CodeWorkspaceFileItem {
+  path: string
+  type: 'file' | 'dir'
+  sizeBytes?: number
+}
+
+export interface CodeWorkspaceListFilesResult {
+  success: boolean
+  root?: string
+  items?: CodeWorkspaceFileItem[]
+  truncated?: boolean
+  error?: string
+}
+
+export interface CodeWorkspaceApprovalRequest {
+  requestId: string
+  kind: CodeWorkspaceApprovalKind
+  workspaceRoot: string
+  targetPath?: string
+  command?: string
+  diffPreview?: string
+  risk: CodeWorkspaceApprovalRisk
+  summary: string
+  createdAt: number
+}
+
+export interface CodeWorkspaceEvent {
+  type: 'state' | 'log' | 'preview-url' | 'approval-resolved'
+  state?: CodeWorkspaceState
+  log?: string
+  previewUrl?: string
+  requestId?: string
+  decision?: CodeWorkspaceApprovalDecision
+  at: number
+}
+
 export interface StatsPartialError {
   dbName?: string
   dbPath?: string
@@ -165,17 +227,31 @@ export interface StatsPartialError {
   message: string
 }
 
+export type AgentMemorySourceType =
+  | 'message'
+  | 'conversation_block'
+  | 'fact'
+  | 'relationship'
+  | 'profile'
+  | 'timeline_summary'
+  | 'media'
+
 export interface AgentMemoryItem {
   id: number
-  sourceType: 'profile' | 'fact' | 'relationship' | string
+  memoryUid: string
+  sourceType: AgentMemorySourceType
   sessionId: string | null
   contactId: string | null
   groupId?: string | null
   title: string
   content: string
+  contentHash?: string
+  entities?: string[]
   importance: number
   confidence: number
   tags: string[]
+  timeStart?: number | null
+  timeEnd?: number | null
   sourceRefs?: Array<{ sessionId: string; localId: number; createTime: number; sortSeq: number; senderUsername?: string; excerpt?: string }>
   createdAt: number
   updatedAt: number
@@ -977,6 +1053,7 @@ export interface ElectronAPI {
       success: boolean
       successCount?: number
       failCount?: number
+      outputPaths?: string[]
       error?: string
     }>
     exportSession: (sessionId: string, outputPath: string, options: ExportOptions) => Promise<{
@@ -1206,7 +1283,16 @@ export interface ElectronAPI {
     }) => void) => () => void
   }
   agent: {
-    run: (runId: string, messages: unknown[], scope?: unknown, modelConfig?: unknown, conversationId?: number | null) => Promise<{ success: boolean; error?: string }>
+    run: (
+      runId: string,
+      messages: unknown[],
+      scope?: unknown,
+      modelConfig?: unknown,
+      conversationId?: number | null,
+      planMode?: boolean,
+      toolProfile?: AgentToolProfile,
+      codeWorkspace?: CodeWorkspaceRef | null
+    ) => Promise<{ success: boolean; error?: string }>
     abort: (runId: string) => Promise<{ success: boolean }>
     generateTitle: (firstMessage: string, modelConfig?: unknown) => Promise<{ success: boolean; title?: string; error?: string }>
     onChunk: (runId: string, callback: (chunk: unknown) => void) => () => void
@@ -1219,6 +1305,18 @@ export interface ElectronAPI {
     renameConversation: (id: number, title: string) => Promise<{ success: boolean; conversation?: unknown; error?: string }>
     saveConversationMessages: (payload: unknown) => Promise<{ success: boolean; conversation?: unknown; error?: string }>
     getLastConversation: (scope?: unknown) => Promise<{ success: boolean; conversation?: unknown; error?: string }>
+  }
+  agentWorkspace: {
+    selectWorkspace: () => Promise<{ success: boolean; canceled?: boolean; state?: CodeWorkspaceState; error?: string }>
+    clearWorkspace: () => Promise<{ success: boolean; state?: CodeWorkspaceState; error?: string }>
+    stopDevServer: () => Promise<{ success: boolean; state?: CodeWorkspaceState; result?: unknown; error?: string }>
+    getState: () => Promise<{ success: boolean; state?: CodeWorkspaceState; error?: string }>
+    setApprovalPolicy: (policy: CodeWorkspaceApprovalPolicy) => Promise<{ success: boolean; state?: CodeWorkspaceState; error?: string }>
+    listFiles: (payload: { path?: string; maxDepth?: number; limit?: number }) => Promise<CodeWorkspaceListFilesResult>
+    approve: (requestId: string) => Promise<{ success: boolean; error?: string }>
+    reject: (requestId: string, reason?: string) => Promise<{ success: boolean; error?: string }>
+    onApprovalRequest: (callback: (request: CodeWorkspaceApprovalRequest) => void) => () => void
+    onWorkspaceEvent: (callback: (event: CodeWorkspaceEvent) => void) => () => void
   }
   persona: {
     get: (sessionId: string) => Promise<{ success: boolean; persona?: PersonaRecordInfo | null; error?: string }>
@@ -1238,14 +1336,14 @@ export interface ElectronAPI {
   memory: {
     migrationStatus: () => Promise<{ success: boolean; status?: MemoryMigrationStatusInfo; error?: string }>
     migrateLegacy: () => Promise<{ success: boolean; result?: MemoryMigrationResultInfo; error?: string }>
-    list: (opts?: { sourceType?: 'profile' | 'fact' | 'relationship'; sourceTypes?: Array<'profile' | 'fact' | 'relationship'>; sessionId?: string; tags?: string[]; withoutTags?: string[]; minConfidence?: number; limit?: number }) => Promise<{ success: boolean; items?: AgentMemoryItem[]; stats?: { itemCount: number }; error?: string }>
+    list: (opts?: { sourceType?: AgentMemorySourceType; sourceTypes?: AgentMemorySourceType[]; sessionId?: string; tags?: string[]; withoutTags?: string[]; minConfidence?: number; limit?: number }) => Promise<{ success: boolean; items?: AgentMemoryItem[]; stats?: { itemCount: number }; error?: string }>
     listDiaries: (limit?: number) => Promise<{ success: boolean; diaries?: MemoryDiaryEntryInfo[]; error?: string }>
     readDiary: (date: string) => Promise<{ success: boolean; diary?: MemoryDiaryEntryInfo; error?: string }>
     deleteDiary: (date: string) => Promise<{ success: boolean; error?: string }>
     summarizeTodayDiary: () => Promise<{ success: boolean; alreadyExists?: boolean; diary?: MemoryDiaryEntryInfo; error?: string }>
-    create: (payload: { memoryUid?: string; sourceType?: 'profile' | 'fact' | 'relationship'; content?: string; title?: string; importance?: number; confidence?: number; tags?: string[] }) => Promise<{ success: boolean; item?: AgentMemoryItem; error?: string }>
+    create: (payload: { memoryUid?: string; sourceType?: AgentMemorySourceType; content?: string; title?: string; importance?: number; confidence?: number; tags?: string[] }) => Promise<{ success: boolean; item?: AgentMemoryItem; error?: string }>
     delete: (id: number) => Promise<{ success: boolean; error?: string }>
-    update: (payload: { id: number; sourceType?: 'profile' | 'fact' | 'relationship'; content?: string; importance?: number; confidence?: number; tags?: string[] }) => Promise<{ success: boolean; item?: AgentMemoryItem; error?: string }>
+    update: (payload: { id: number; sourceType?: AgentMemorySourceType; content?: string; importance?: number; confidence?: number; tags?: string[] }) => Promise<{ success: boolean; item?: AgentMemoryItem; error?: string }>
     consolidate: () => Promise<{ success: boolean; result?: { removed: number; groups: number; scanned: number; profileBuilt?: boolean; profileBuildError?: string }; error?: string }>
     exportMarkdown: (outputDir: string) => Promise<{ success: boolean; result?: { files: string[]; itemCount: number }; error?: string }>
   }

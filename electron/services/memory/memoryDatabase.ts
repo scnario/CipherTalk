@@ -102,6 +102,11 @@ export const ONBOARDING_PROFILE_UIDS = [
   'profile:interaction-preference'
 ]
 const ONBOARDING_PROFILE_UID_SET = new Set(ONBOARDING_PROFILE_UIDS)
+// 仅迁移新版 Markdown 记忆系统实际使用的「策展型」记忆类型；旧版 message/conversation_block/
+// timeline_summary/media 是为已移除的向量检索逐条消息建的索引，新系统用不到，迁过来只会砸出
+// 上万个 .md 文件并拖垮 listMemoryItems/syncDerivedMarkdown，故按 source_type 过滤掉。
+const MIGRATABLE_SOURCE_TYPES: MemorySourceType[] = ['fact', 'relationship', 'profile']
+const MIGRATABLE_SOURCE_TYPES_SQL = MIGRATABLE_SOURCE_TYPES.map((type) => `'${type}'`).join(', ')
 
 export type MarkdownMemoryRetrievalMode = 'fact' | 'recent' | 'topic'
 
@@ -265,6 +270,11 @@ function formatDate(ms = nowMs()): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
 }
 
+function normalizeDiarySummaryHour(value: unknown): number {
+  const hour = Math.floor(Number(value))
+  return Number.isFinite(hour) ? Math.max(0, Math.min(23, hour)) : 2
+}
+
 function frontMatterValue(value: unknown): string {
   return JSON.stringify(value ?? null)
 }
@@ -425,7 +435,38 @@ export class MemoryDatabase {
       ''
     ].join('\n'))
     this.rootPath = root
+    this.pruneLegacyIndexFilesOnce()
     return root
+  }
+
+  /**
+   * 一次性清理旧版被写坏的「逐条消息索引」文件：早期破损的迁移会把 message/conversation_block/
+   * timeline_summary/media 也全量落成 .md，几万个文件会让之后每次 listMemoryItems readdir+解析卡死。
+   * 按文件名（id-sourceType-uid.md）廉价判定，不解析文件内容；用 meta 标记保证只跑一次。
+   */
+  private pruneLegacyIndexFilesOnce(): void {
+    const meta = this.readMeta()
+    if (meta.prunedLegacyIndexFiles === 'true') return
+    const removed = this.pruneNonMigratableItemFiles()
+    this.writeMeta({ prunedLegacyIndexFiles: true, ...(removed > 0 ? { prunedLegacyIndexCount: removed } : {}) })
+  }
+
+  private pruneNonMigratableItemFiles(): number {
+    const allowed = new Set<string>(MIGRATABLE_SOURCE_TYPES)
+    const itemsDir = join(this.getMemoryBankPath(), ITEMS_DIR)
+    let removed = 0
+    for (const name of readdirSync(itemsDir)) {
+      if (!name.endsWith('.md')) continue
+      const sourceType = /^\d+-([^-]+)-/.exec(name)?.[1]
+      if (!sourceType || allowed.has(sourceType)) continue
+      try {
+        unlinkSync(join(itemsDir, name))
+        removed += 1
+      } catch {
+        // 单个文件删除失败不阻塞初始化
+      }
+    }
+    return removed
   }
 
   private migrateLegacySelfReferenceDir(root: string): void {
@@ -1097,9 +1138,9 @@ export class MemoryDatabase {
     writeFileSync(file, current.endsWith('\n') ? current + block : `${current}\n${block}`, 'utf8')
   }
 
-  getDailyConsolidationTarget(timestamp = nowMs()): string | null {
+  getDailyConsolidationTarget(timestamp = nowMs(), summaryHour = 2): string | null {
     const hour = new Date(timestamp).getHours()
-    if (hour < 2) return null
+    if (hour < normalizeDiarySummaryHour(summaryHour)) return null
     const date = formatDate(timestamp)
     const meta = this.readMeta()
     return meta.lastConsolidatedDate === date ? null : date
@@ -1187,7 +1228,7 @@ export class MemoryDatabase {
       try {
         const row = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='memory_items'").get()
         if (!row) return { needed: false, legacyDbPath, memoryBankPath, itemCount: 0, migratedItemCount }
-        const countRow = db.prepare('SELECT COUNT(*) AS count FROM memory_items').get() as { count: number } | undefined
+        const countRow = db.prepare(`SELECT COUNT(*) AS count FROM memory_items WHERE source_type IN (${MIGRATABLE_SOURCE_TYPES_SQL})`).get() as { count: number } | undefined
         const itemCount = Number(countRow?.count || 0)
         const meta = this.readMeta()
         const migratedLegacyCount = Number(meta.migratedLegacyItemCount || 0)
@@ -1213,7 +1254,7 @@ export class MemoryDatabase {
 
     const db = new Database(status.legacyDbPath, { readonly: true, fileMustExist: true })
     try {
-      const rows = db.prepare('SELECT * FROM memory_items ORDER BY created_at ASC, id ASC').all() as MemoryItemRow[]
+      const rows = db.prepare(`SELECT * FROM memory_items WHERE source_type IN (${MIGRATABLE_SOURCE_TYPES_SQL}) ORDER BY created_at ASC, id ASC`).all() as MemoryItemRow[]
       const index = this.readItemIndex()
       const meta = this.readMeta()
       let lastId = Math.max(index.maxId, Math.floor(Number(meta.lastId || 0)))

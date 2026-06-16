@@ -7,6 +7,13 @@ import type { ChatTransport, UIMessage, UIMessageChunk } from 'ai'
 
 export type AgentScope = { kind: 'global' } | { kind: 'session'; sessionId: string; displayName?: string }
 export type AgentReasoningEffort = 'auto' | 'minimal' | 'low' | 'medium' | 'high'
+export type AgentToolProfile = 'chat' | 'code' | 'hybrid'
+export type CodeWorkspaceApprovalPolicy = 'on-request' | 'risk-based' | 'full-access'
+export type CodeWorkspaceRef = {
+  id: string
+  root: string
+  approvalPolicy: CodeWorkspaceApprovalPolicy
+}
 export type AgentModelConfig = {
   provider?: string
   apiKey?: string
@@ -38,7 +45,16 @@ export type AgentProgressEvent = {
 }
 
 interface AgentBridge {
-  run: (runId: string, messages: unknown[], scope?: unknown, modelConfig?: AgentModelConfig | null, conversationId?: number | null, planMode?: boolean) => Promise<{ success: boolean; error?: string }>
+  run: (
+    runId: string,
+    messages: unknown[],
+    scope?: unknown,
+    modelConfig?: AgentModelConfig | null,
+    conversationId?: number | null,
+    planMode?: boolean,
+    toolProfile?: AgentToolProfile,
+    codeWorkspace?: CodeWorkspaceRef | null
+  ) => Promise<{ success: boolean; error?: string }>
   abort: (runId: string) => Promise<{ success: boolean }>
   onChunk: (runId: string, callback: (chunk: unknown) => void) => () => void
   onProgress: (runId: string, callback: (progress: unknown) => void) => () => void
@@ -61,7 +77,9 @@ export class IpcChatTransport<UI_MESSAGE extends UIMessage = UIMessage> implemen
     private readonly getModelConfig?: () => AgentModelConfig | null,
     private readonly getConversationId?: () => number | null,
     private readonly onProgress?: (progress: AgentProgressEvent) => void,
-    private readonly getPlanMode?: () => boolean
+    private readonly getPlanMode?: () => boolean,
+    private readonly getToolProfile?: () => AgentToolProfile,
+    private readonly getCodeWorkspace?: () => CodeWorkspaceRef | null
   ) {}
 
   async sendMessages(options: {
@@ -75,6 +93,8 @@ export class IpcChatTransport<UI_MESSAGE extends UIMessage = UIMessage> implemen
     const modelConfig = this.getModelConfig?.() ?? null
     const conversationId = this.getConversationId?.() ?? null
     const planMode = this.getPlanMode?.() ?? false
+    const toolProfile = this.getToolProfile?.() ?? 'chat'
+    const codeWorkspace = this.getCodeWorkspace?.() ?? null
     const progressHandler = this.onProgress
 
     options.abortSignal?.addEventListener('abort', () => { void bridge.abort(runId) })
@@ -95,7 +115,7 @@ export class IpcChatTransport<UI_MESSAGE extends UIMessage = UIMessage> implemen
           }
         })
         // 触发主进程运行；run resolve 即代表本次结束（chunk 已通过 onChunk 推完，[DONE] 关流）
-        void bridge.run(runId, messages, scope, modelConfig, conversationId, planMode).catch((error: unknown) => {
+        void bridge.run(runId, messages, scope, modelConfig, conversationId, planMode, toolProfile, codeWorkspace).catch((error: unknown) => {
           try {
             controller.enqueue({ type: 'error', errorText: error instanceof Error ? error.message : String(error) } as UIMessageChunk)
             controller.close()

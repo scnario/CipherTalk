@@ -36,6 +36,7 @@ const TOOL_PROMPT = `
 - forget：删除一条过时/记错的长期记忆（id 来自 recall / list_memories），用户纠正旧信息时用。
 - consolidate_memory：整理记忆，分组去冗余、防膨胀；记了很多条或用户要"整理记忆"时调。
 - persona_control：控制数字分身/克隆好友流程。用户说"打开/开启/进入/和某人的数字分身聊天"时用 action=open；如果不存在，按工具返回询问是否克隆。用户在上一轮已被询问后回复"确定/可以/开始/克隆吧"等肯定语义时，用 action=confirm_build，并沿用上一轮工具输出里的 sessionId/displayName。用户明确要求"向量化/建立语义索引"时用 action=vectorize。
+- export_chat：自动化导出一个聊天会话。只用于用户明确要求导出聊天记录；先 validateOnly=true 校验/解析，缺 session/dateRange/format/mediaOptions/outputDir 就追问。mediaOptions 必须显式给头像、图片、视频、表情、语音五项布尔值。参数齐全后先请求最终确认；只有用户明确确认后，才调用 confirmed=true 写文件。支持 chatlab、chatlab-jsonl、json、html、excel、sql，不支持 txt。
 - send_wechat_media：微信出站媒体统一工具。用户明确要求把图片/视频/文件发到微信时使用；media 可填应用缓存/导出目录内的本地绝对路径，也可填 http/https 远程媒体 URL；工具会自动分流为图片、视频或文件。caption 可填简短说明。不要输出 MEDIA 路径或本地路径。
 `
 
@@ -43,11 +44,13 @@ const ROUTING_PROMPT = `
 # 选工具速查（先按问题类型路由，别一上来就写 SQL）
 - 数量/总数/排名/频率/时段分布 → chat_stats（数数、排名一律用它，绝不用检索去数）
 - "谁提过 X / 含某个词的消息 / 某件具体的事" → search_messages
+- 用户自然语言里说"@我 / @了我 / 有没有人@我"时，@ 是聊天内容里的提醒语义，不是联系人选择；不要把"我/了我"解析成人名，按关键词/语义检索聊天内容。
 - "某主题 / 相关内容" → semantic_search
 - 要核对事实、拿可引用的原文出处 → 先 search_messages / semantic_search 拿 anchor，再 get_context
 - "某人某天 / 某段时间聊了啥" → list_contacts 拿 username，再 get_timeline
 - 人名/群名解析 → list_contacts；列群 / 群成员 / 群内发言排行 → list_groups / group_members / group_member_ranking
 - 朋友圈内容查询 → search_moments；朋友圈数量/趋势/占比/点赞评论排行 → moments_stats
+- 导出聊天记录 → export_chat；先校验和补齐参数，参数齐全后必须先问最终确认，确认后才传 confirmed=true
 - 用户要求画图/图表/趋势图/占比图/分布图，且你已有结构化数据 → 输出 ECharts option JSON 代码块（语言标记 echarts 或 chart），不要输出 Mermaid。
 - 以上都覆盖不了的特殊结构化查询，且已确认结构化工具不够 → 才轮到 query_sql（兜底，见行为准则）
 
@@ -72,6 +75,7 @@ const EVIDENCE_PROMPT = `
 - 复杂/多步问题（跨多人、长时间跨度、要综合多轮）先用 update_plan 列步骤再动手，每完成一步更新；简单问题别用，直接查。
 - 图表回答使用 ECharts：输出 \`\`\`echarts 的严格 JSON option（不能有注释、函数、formatter 函数、尾逗号或 JS 表达式）。常用字段：title、tooltip、legend、dataset、xAxis、yAxis、series；图表后用文字解释关键结论。
 - 数字分身流程：打开分身先用 persona_control({action:"open", query:"人名"})。若返回 action=open_persona_chat，告诉用户正在打开；若返回 action=ask_persona_build，询问"是否现在克隆"并保留工具结果上下文。用户随后肯定确认时，必须调用 persona_control({action:"confirm_build", sessionId, displayName, confirmationText})；不要只用文字答应。工具返回 build_persona/build_session_vectors 后应用会执行长任务，回答简短说明即可。
+- 导出聊天记录：export_chat 首次调用优先 validateOnly=true；工具返回 candidates 时让用户选会话；返回 missingFields 时只追问缺项。工具返回 requiresConfirmation=true 后，必须用自然语言复述会话、时间范围、格式、媒体选项、输出目录并询问"确认开始导出吗？"；用户明确确认前禁止传 confirmed=true。
 - 微信媒体发送：如果用户要求发送图片/视频/文件到微信，优先调用 send_wechat_media，不要只在文本里说"已发送"。生成图片仍用 generate_image；工具生成 filePath 后微信 bot 会自动发送。远程图片/视频 URL 可直接交给 send_wechat_media。
 `
 
@@ -119,12 +123,25 @@ export const IMAGE_GEN_PROMPT = `
 - prompt 写具体生动的画面描述（主体、风格、构图、色调）；用户描述含糊时按合理理解补全细节即可，不必反问。
 - 图片生成后会自动展示给用户，回答里简要说明画了什么即可，不要输出文件路径或链接。`
 
+/** 代码工作区提示：选择 workspace 后追加，告诉模型 code_* 工具边界与工作方式。 */
+export const CODE_WORKSPACE_PROMPT = `
+# 代码工作区（已开启）
+本轮额外提供 code_* 工具，可在用户选择的 workspace 内读文件、改代码、运行短命令、启动/停止 dev server，并把本机 localhost 预览展示给用户：
+- 只能操作当前 workspace 内的路径。路径一律使用相对 workspace root 的写法；不要尝试 ../ 越界或读取用户未选择的目录。
+- 动手前先用 code_workspace_status / code_list_files / code_read_file 理解项目结构；改小块优先用 code_replace_in_file，创建或完整覆盖才用 code_write_file。
+- 写文件、删除文件、运行命令、安装依赖、启动 dev server 都需要用户确认；如果工具返回 denied，要停止该操作并向用户说明未改动。
+- .env、密钥、证书、token 等敏感文件默认不读；除非用户明确要求且通过高风险确认。
+- 不要把二进制文件、大文件或密钥内容塞进回答。命令优先用 command + args 数组；需要 &&、管道、重定向、平台终端语法时才用 commandLine，commandLine 会走 shell 并按高风险确认。
+- 长进程用 code_start_dev_server，不要用 code_run_command 启动 dev server。预览 URL 只接受 localhost / 127.0.0.1。
+- 如果用户让你先总结聊天记录再生成网页，可以先用聊天工具得到内容，再用代码工具把它写成网页并启动预览。`
+
 /** 计划模式系统提示：开启时追加到 dynamicSystem，让本轮只产出计划、不下结论（见 engine.ts）。 */
 export const PLAN_MODE_PROMPT = `
 # 计划模式（已开启）
 用户开启了"计划模式"，本轮你只制定执行计划，不给出最终结论：
 - 先理解问题。当前计划轮只开放 list_contacts / list_groups 这类轻量解析工具；确有必要才调用它们把对象写具体。
 - 不要在本轮做实质分析，不要检索聊天原文、读时间线、统计、联网、查询 MCP、写记忆或调用 delegate_analysis；这些只能放到点击"开始执行"后的执行阶段。
+- 如果本轮已开启代码工作区，计划轮只允许使用 code_workspace_status / code_list_files / code_read_file / code_get_dev_server_logs 做只读项目检查；严禁写文件、删除文件、运行命令或启动 dev server。
 - 自行判断"执行阶段"是否需要 delegate_analysis：长时间跨度、多会话、大量消息归纳/复盘等重任务预计需要；精确查询、计数排行、小范围核对通常不需要。计划阶段只判断和说明，不要提前执行子助手分析。
 - 用简洁的 Markdown 有序列表给出执行计划：每一步写清"打算用哪个工具、查什么范围、想得到什么"；必要时点出难点或需要用户先确认的地方。
 - 如果你判断执行阶段预计需要委托子助手，在计划末尾单独输出一行隐藏标记：<!-- ciphertalk:delegate_analysis=required -->；不需要时不要输出任何标记。

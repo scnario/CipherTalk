@@ -10,6 +10,8 @@ import { join } from 'path'
 import type { UIMessageChunk } from 'ai'
 import { getAppPath, isElectronPackaged } from '../runtimePaths'
 import { getElectronWorkerEnv } from '../workerEnvironment'
+import { codeWorkspaceService } from './codeWorkspaceService'
+import type { CodeWorkspaceToolCall } from './codeWorkspaceTypes'
 import type { AgentProgressEvent, AgentProviderConfig, AgentRunInput } from './types'
 
 const UTILITY_FILE = 'aiAgentUtilityProcess.js'
@@ -38,6 +40,21 @@ function errorToLogData(error: unknown): Record<string, unknown> {
 
 function truncateLogText(text: string, maxLength = 2000): string {
   return text.length > maxLength ? `${text.slice(0, maxLength)}...<truncated>` : text
+}
+
+function shouldSuppressUtilityStderrLine(line: string): boolean {
+  return /\bAI SDK Warning\b/.test(line) && (
+    line.includes('cacheControl breakpoint limit') ||
+    /Maximum\s+\d+\s+cache breakpoints exceeded/i.test(line)
+  )
+}
+
+function filterUtilityStderr(text: string): string {
+  return text
+    .split(/\r?\n/)
+    .filter((line) => !shouldSuppressUtilityStderrLine(line))
+    .join('\n')
+    .trim()
 }
 
 export class AgentProcessService {
@@ -214,7 +231,7 @@ export class AgentProcessService {
         }
       })
       worker.stderr?.on('data', (chunk: Buffer) => {
-        const text = chunk.toString().trim()
+        const text = filterUtilityStderr(chunk.toString().trim())
         if (text) {
           console.error(`[aiAgentUtility:${worker.pid ?? 'unknown'}] ${text}`)
           this.logger?.warn('AIAgentProcess', 'AI Agent utility stderr', {
@@ -231,6 +248,18 @@ export class AgentProcessService {
         }
         if (msg?.type === 'mcp:callTool') {
           void this.handleMcpCall(worker, msg.payload)
+          return
+        }
+        if (msg?.type === 'codeWorkspace:call') {
+          void this.handleCodeWorkspaceCall(worker, msg.payload)
+          return
+        }
+        if (msg?.type === 'aiExport:call') {
+          void this.handleAiExportCall(worker, msg.payload)
+          return
+        }
+        if (msg?.type === 'aiExport:abort') {
+          void this.handleAiExportAbort(msg.payload)
           return
         }
         if (msg?.id === 0 && msg.type === 'ready') {
@@ -378,6 +407,64 @@ export class AgentProcessService {
       worker.postMessage({ type: 'mcp:result', payload: { reqId, result: response.result } })
     } catch (e: any) {
       worker.postMessage({ type: 'mcp:result', payload: { reqId, error: e?.message || String(e) } })
+    }
+  }
+
+  /**
+   * 处理子进程发来的代码工作区请求：文件系统和 shell 只允许主进程 CodeWorkspaceService 触碰。
+   */
+  private async handleCodeWorkspaceCall(
+    worker: UtilityProcess,
+    payload: { reqId: number } & CodeWorkspaceToolCall,
+  ): Promise<void> {
+    const reqId = payload?.reqId
+    try {
+      const result = await codeWorkspaceService.handleToolCall({
+        method: payload.method,
+        args: payload.args && typeof payload.args === 'object' ? payload.args : {},
+        workspace: payload.workspace ?? null,
+      })
+      worker.postMessage({ type: 'codeWorkspace:result', payload: { reqId, result } })
+    } catch (e: any) {
+      worker.postMessage({ type: 'codeWorkspace:result', payload: { reqId, error: e?.message || String(e) } })
+    }
+  }
+
+  /**
+   * 处理 Agent 子进程发来的 AI 导出请求：主进程只拉起/回收导出 utility process，
+   * 实际校验、解析与 exportService 调用都在 aiExportUtilityProcess 里完成。
+   */
+  private async handleAiExportCall(
+    worker: UtilityProcess,
+    payload: { reqId: number; method: string; args?: Record<string, unknown> },
+  ): Promise<void> {
+    const reqId = payload?.reqId
+    try {
+      if (payload?.method !== 'exportChat') {
+        throw new Error(`unknown aiExport method: ${payload?.method}`)
+      }
+      const { aiExportProcessService } = await import('./aiExportProcessService')
+      aiExportProcessService.setLogger(this.logger)
+      const requestId = `agent-${reqId}`
+      const result = await aiExportProcessService.exportChat(
+        requestId,
+        payload.args || {},
+        (progress) => worker.postMessage({ type: 'aiExport:progress', payload: { reqId, progress } }),
+      )
+      worker.postMessage({ type: 'aiExport:result', payload: { reqId, result } })
+    } catch (e: any) {
+      worker.postMessage({ type: 'aiExport:result', payload: { reqId, error: e?.message || String(e) } })
+    }
+  }
+
+  private async handleAiExportAbort(payload: { reqId: number }): Promise<void> {
+    try {
+      const reqId = payload?.reqId
+      if (typeof reqId !== 'number') return
+      const { aiExportProcessService } = await import('./aiExportProcessService')
+      aiExportProcessService.abort(`agent-${reqId}`)
+    } catch {
+      // ignore abort races
     }
   }
 

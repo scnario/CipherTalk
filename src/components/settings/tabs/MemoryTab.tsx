@@ -3,89 +3,146 @@ import {
   AlertDialog,
   Button,
   ButtonGroup,
+  Card,
   Chip,
   Description,
-  Input,
+  InputGroup,
   Label,
   ListBox,
   NumberField,
   Select,
   Skeleton,
-  Surface,
-  Table,
-  TextArea,
-  Toolbar,
+  TextField,
   Typography,
+  type Key,
 } from '@heroui/react'
-import { Check, Download, Eye, Pencil, RefreshCw, Sparkles, Trash2, X } from 'lucide-react'
-import type { AgentMemoryItem } from '../../../types/electron'
+import { Check, Download, Pencil, Plus, RefreshCw, Search, Sparkles, Trash2, X } from 'lucide-react'
+import type { AgentMemoryItem, AgentMemorySourceType } from '../../../types/electron'
 
 interface MemoryTabProps {
   showMessage: (text: string, success: boolean) => void
 }
 
-function kindLabel(kind: string) {
-  if (kind === 'profile') return '画像'
-  if (kind === 'fact') return '事实'
-  if (kind === 'relationship') return '关系'
-  return kind
+const MEMORY_SOURCE_OPTIONS: Array<{ value: AgentMemorySourceType; label: string }> = [
+  { value: 'profile', label: '画像' },
+  { value: 'fact', label: '事实' },
+  { value: 'relationship', label: '关系' },
+  { value: 'message', label: '消息' },
+  { value: 'conversation_block', label: '对话块' },
+  { value: 'timeline_summary', label: '时间线' },
+  { value: 'media', label: '媒体' },
+]
+
+const LOAD_LIMIT = 2000
+
+type MemoryTypeFilter = AgentMemorySourceType | 'all'
+type MemoryStatusFilter = 'all' | 'auto' | 'pending'
+type EditingId = number | 'new' | null
+
+type MemoryDraft = {
+  content: string
+  sourceType: AgentMemorySourceType
+  importance: number
+  confidence: number
+  tagsText: string
 }
 
-function memoryKindFromValue(value: unknown): 'profile' | 'fact' | 'relationship' {
-  if (value === 'profile') return 'profile'
-  if (value === 'relationship') return 'relationship'
-  return 'fact'
+const DEFAULT_DRAFT: MemoryDraft = {
+  content: '',
+  sourceType: 'fact',
+  importance: 0.5,
+  confidence: 1,
+  tagsText: '',
 }
 
-function formatTime(value: number): string {
-  if (!value) return '-'
-  return new Date(value).toLocaleString('zh-CN')
+function sourceLabel(value: string) {
+  return MEMORY_SOURCE_OPTIONS.find((option) => option.value === value)?.label || value || '未知'
+}
+
+function toSourceType(value: unknown): AgentMemorySourceType {
+  const text = String(value || '').trim()
+  return MEMORY_SOURCE_OPTIONS.some((option) => option.value === text)
+    ? text as AgentMemorySourceType
+    : 'fact'
+}
+
+function clamp01(value: number, fallback = 0) {
+  if (!Number.isFinite(value)) return fallback
+  return Math.max(0, Math.min(1, value))
+}
+
+function formatScore(value: number) {
+  return `${Math.round(clamp01(value) * 100)}%`
 }
 
 function isPendingMemory(item: AgentMemoryItem): boolean {
   return item.tags?.includes('pending')
 }
 
-type MemoryDraft = {
-  content: string
-  sourceType: 'profile' | 'fact' | 'relationship'
-  importance: number
-  confidence: number
-  tagsText: string
+function isAutoMemory(item: AgentMemoryItem): boolean {
+  return item.tags?.includes('auto')
 }
 
-type MemoryFilter = 'all' | 'auto' | 'pending' | 'high'
+function parseTags(tagsText: string): string[] {
+  return Array.from(new Set(
+    tagsText
+      .split(/[,，\n]/)
+      .map((tag) => tag.trim())
+      .filter(Boolean),
+  ))
+}
+
+function toDraft(item: AgentMemoryItem): MemoryDraft {
+  return {
+    content: item.content,
+    sourceType: toSourceType(item.sourceType),
+    importance: clamp01(item.importance, 0.5),
+    confidence: clamp01(item.confidence, 1),
+    tagsText: item.tags.join(', '),
+  }
+}
+
+function searchableText(item: AgentMemoryItem) {
+  return [
+    item.title,
+    item.content,
+    item.sourceType,
+    item.tags?.join(' '),
+  ].filter(Boolean).join('\n').toLowerCase()
+}
 
 export default function MemoryTab({ showMessage }: MemoryTabProps) {
   const [items, setItems] = useState<AgentMemoryItem[]>([])
   const [count, setCount] = useState(0)
   const [loading, setLoading] = useState(false)
-  const [editingId, setEditingId] = useState<number | null>(null)
+  const [exporting, setExporting] = useState(false)
+  const [consolidating, setConsolidating] = useState(false)
+  const [editingId, setEditingId] = useState<EditingId>(null)
   const [draft, setDraft] = useState<MemoryDraft | null>(null)
-  const [filter, setFilter] = useState<MemoryFilter>('all')
-  const [selectedId, setSelectedId] = useState<number | null>(null)
+  const [typeFilter, setTypeFilter] = useState<MemoryTypeFilter>('all')
+  const [statusFilter, setStatusFilter] = useState<MemoryStatusFilter>('all')
+  const [query, setQuery] = useState('')
 
   const filteredItems = useMemo(() => {
-    if (filter === 'auto') return items.filter((item) => item.tags?.includes('auto'))
-    if (filter === 'pending') return items.filter(isPendingMemory)
-    if (filter === 'high') return items.filter((item) => item.importance >= 0.75 && item.confidence >= 0.75)
-    return items
-  }, [filter, items])
-
-  const selectedItem = useMemo(
-    () => items.find((item) => item.id === selectedId) || null,
-    [items, selectedId],
-  )
+    const normalizedQuery = query.trim().toLowerCase()
+    return items.filter((item) => {
+      if (typeFilter !== 'all' && item.sourceType !== typeFilter) return false
+      if (statusFilter === 'auto' && !isAutoMemory(item)) return false
+      if (statusFilter === 'pending' && !isPendingMemory(item)) return false
+      if (normalizedQuery && !searchableText(item).includes(normalizedQuery)) return false
+      return true
+    })
+  }, [items, query, statusFilter, typeFilter])
 
   const load = async () => {
     setLoading(true)
     try {
-      const res = await window.electronAPI.memory.list({ sourceTypes: ['profile', 'fact', 'relationship'], limit: 500 })
+      const res = await window.electronAPI.memory.list({ limit: LOAD_LIMIT })
       if (res.success) {
         const merged = [...(res.items ?? [])]
-          .sort((a, b) => b.updatedAt - a.updatedAt || b.id - a.id)
+          .sort((a, b) => (b.timeEnd || b.timeStart || b.updatedAt) - (a.timeEnd || a.timeStart || a.updatedAt) || b.id - a.id)
         setItems(merged)
-        setCount(merged.length)
+        setCount(res.stats?.itemCount ?? merged.length)
       } else {
         showMessage(res.error || '加载记忆失败', false)
       }
@@ -98,26 +155,8 @@ export default function MemoryTab({ showMessage }: MemoryTabProps) {
 
   useEffect(() => { void load() }, [])
 
-  const handleDelete = async (id: number) => {
-    const res = await window.electronAPI.memory.delete(id)
-    if (res.success) {
-      setItems((prev) => prev.filter((m) => m.id !== id))
-      setCount((c) => Math.max(0, c - 1))
-      if (selectedId === id) setSelectedId(null)
-    } else {
-      showMessage(res.error || '删除失败', false)
-    }
-  }
-
-  const startEdit = (item: AgentMemoryItem) => {
-    setEditingId(item.id)
-    setDraft({
-      content: item.content,
-      sourceType: memoryKindFromValue(item.sourceType),
-      importance: item.importance,
-      confidence: item.confidence,
-      tagsText: item.tags.join(', '),
-    })
+  const updateDraft = (patch: Partial<MemoryDraft>) => {
+    setDraft((current) => current ? { ...current, ...patch } : current)
   }
 
   const cancelEdit = () => {
@@ -125,70 +164,102 @@ export default function MemoryTab({ showMessage }: MemoryTabProps) {
     setDraft(null)
   }
 
-  const handleSave = async (id: number) => {
-    if (!draft) return
+  const startCreate = () => {
+    setEditingId('new')
+    setDraft(DEFAULT_DRAFT)
+  }
+
+  const startEdit = (item: AgentMemoryItem) => {
+    setEditingId(item.id)
+    setDraft(toDraft(item))
+  }
+
+  const handleDelete = async (id: number) => {
+    const res = await window.electronAPI.memory.delete(id)
+    if (res.success) {
+      setItems((prev) => prev.filter((memory) => memory.id !== id))
+      setCount((current) => Math.max(0, current - 1))
+      if (editingId === id) cancelEdit()
+    } else {
+      showMessage(res.error || '删除失败', false)
+    }
+  }
+
+  const handleSave = async () => {
+    if (!draft || !editingId) return
     const content = draft.content.trim()
     if (!content) {
       showMessage('记忆内容不能为空', false)
       return
     }
-    const tags = draft.tagsText
-      .split(/[,，]/)
-      .map((tag) => tag.trim())
-      .filter(Boolean)
+
+    const payload = {
+      sourceType: draft.sourceType,
+      content,
+      importance: clamp01(draft.importance, 0.5),
+      confidence: clamp01(draft.confidence, 1),
+      tags: parseTags(draft.tagsText),
+    }
+
     try {
-      const res = await window.electronAPI.memory.update({
-        id,
-        sourceType: draft.sourceType,
-        content,
-        importance: draft.importance,
-        confidence: draft.confidence,
-        tags,
-      })
+      const res = editingId === 'new'
+        ? await window.electronAPI.memory.create({ ...payload, title: content.slice(0, 40) })
+        : await window.electronAPI.memory.update({ id: editingId, ...payload })
+
       if (res.success && res.item) {
-        setItems((prev) => prev.map((m) => (m.id === id ? res.item! : m)))
+        if (editingId === 'new') {
+          setItems((prev) => [res.item!, ...prev])
+          setCount((current) => current + 1)
+        } else {
+          setItems((prev) => prev.map((item) => (item.id === editingId ? res.item! : item)))
+        }
         cancelEdit()
-        showMessage('记忆已更新', true)
+        showMessage(editingId === 'new' ? '记忆已创建' : '记忆已更新', true)
       } else {
-        showMessage(res.error || '更新失败', false)
+        showMessage(res.error || '保存失败', false)
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       showMessage(message.includes('No handler registered')
         ? '记忆保存 IPC 尚未加载，请重启应用后再试'
-        : `更新失败：${message}`, false)
-    }
-  }
-
-  const handleConsolidate = async () => {
-    const res = await window.electronAPI.memory.consolidate()
-    if (res.success) {
-      showMessage(`整理完成，清理 ${res.result?.removed ?? 0} 条`, true)
-      void load()
-    } else {
-      showMessage(res.error || '整理失败', false)
+        : `保存失败：${message}`, false)
     }
   }
 
   const handleConfirmMemory = async (item: AgentMemoryItem) => {
-    const tags = (item.tags || []).filter((tag) => tag !== 'pending')
     const res = await window.electronAPI.memory.update({
       id: item.id,
-      sourceType: memoryKindFromValue(item.sourceType),
+      sourceType: toSourceType(item.sourceType),
       content: item.content,
       importance: Math.max(item.importance, 0.75),
       confidence: Math.max(item.confidence, 0.85),
-      tags,
+      tags: (item.tags || []).filter((tag) => tag !== 'pending'),
     })
     if (res.success && res.item) {
-      setItems((prev) => prev.map((m) => (m.id === item.id ? res.item! : m)))
+      setItems((prev) => prev.map((memory) => (memory.id === item.id ? res.item! : memory)))
       showMessage('已确认自动记忆', true)
     } else {
       showMessage(res.error || '确认失败', false)
     }
   }
 
+  const handleConsolidate = async () => {
+    setConsolidating(true)
+    try {
+      const res = await window.electronAPI.memory.consolidate()
+      if (res.success) {
+        showMessage(`整理完成，清理 ${res.result?.removed ?? 0} 条`, true)
+        void load()
+      } else {
+        showMessage(res.error || '整理失败', false)
+      }
+    } finally {
+      setConsolidating(false)
+    }
+  }
+
   const handleExportMarkdown = async () => {
+    setExporting(true)
     try {
       const picked = await window.electronAPI.dialog.openFile({ title: '选择记忆导出目录', properties: ['openDirectory'] })
       if (picked.canceled || picked.filePaths.length === 0) return
@@ -200,287 +271,278 @@ export default function MemoryTab({ showMessage }: MemoryTabProps) {
       }
     } catch {
       showMessage('导出失败', false)
+    } finally {
+      setExporting(false)
     }
   }
 
-  return (
-    <>
-      <Surface className="mb-4 flex items-center justify-between gap-4" variant="transparent">
-        <div>
-          <Chip color="accent" size="sm" variant="soft">{count} 条</Chip>
-          <Chip size="sm" variant="soft">画像 / 事实</Chip>
-          <Description>
-            AI 跨对话记住的关于你的画像、偏好和事实。内容存放在缓存目录的 memory-bank Markdown 文件夹，可在此查看、修改或删除。
-          </Description>
+  const renderTypeSelect = (value: MemoryTypeFilter, onChange: (value: MemoryTypeFilter) => void) => (
+    <Select
+      fullWidth
+      selectedKey={value}
+      variant="secondary"
+      onSelectionChange={(key: Key | null) => {
+        if (key != null) onChange(String(key) as MemoryTypeFilter)
+      }}
+    >
+      <Label>类型</Label>
+      <Select.Trigger>
+        <Select.Value>{() => value === 'all' ? '全部' : sourceLabel(value)}</Select.Value>
+        <Select.Indicator />
+      </Select.Trigger>
+      <Select.Popover>
+        <ListBox>
+          <ListBox.Item id="all" textValue="全部">
+            全部
+            <ListBox.ItemIndicator />
+          </ListBox.Item>
+          {MEMORY_SOURCE_OPTIONS.map((option) => (
+            <ListBox.Item key={option.value} id={option.value} textValue={option.label}>
+              {option.label}
+              <ListBox.ItemIndicator />
+            </ListBox.Item>
+          ))}
+        </ListBox>
+      </Select.Popover>
+    </Select>
+  )
+
+  const renderEditor = () => {
+    if (!draft) return null
+    return (
+      <div className="space-y-4 rounded-lg border border-border bg-default p-3">
+        <TextField fullWidth onChange={(value) => updateDraft({ content: value })} value={draft.content}>
+          <Label>内容</Label>
+          <InputGroup fullWidth variant="secondary">
+            <InputGroup.TextArea placeholder="写清这条长期记忆" rows={4} />
+          </InputGroup>
+        </TextField>
+
+        <div className="grid gap-3 md:grid-cols-3">
+          <Select
+            fullWidth
+            selectedKey={draft.sourceType}
+            variant="secondary"
+            onSelectionChange={(key: Key | null) => {
+              if (key != null) updateDraft({ sourceType: toSourceType(key) })
+            }}
+          >
+            <Label>类型</Label>
+            <Select.Trigger>
+              <Select.Value>{() => sourceLabel(draft.sourceType)}</Select.Value>
+              <Select.Indicator />
+            </Select.Trigger>
+            <Select.Popover>
+              <ListBox>
+                {MEMORY_SOURCE_OPTIONS.map((option) => (
+                  <ListBox.Item key={option.value} id={option.value} textValue={option.label}>
+                    {option.label}
+                    <ListBox.ItemIndicator />
+                  </ListBox.Item>
+                ))}
+              </ListBox>
+            </Select.Popover>
+          </Select>
+
+          <NumberField
+            aria-label="重要度"
+            maxValue={1}
+            minValue={0}
+            step={0.05}
+            value={draft.importance}
+            variant="secondary"
+            onChange={(value) => updateDraft({ importance: clamp01(value ?? 0, 0.5) })}
+          >
+            <Label>重要度</Label>
+            <NumberField.Group>
+              <NumberField.DecrementButton />
+              <NumberField.Input />
+              <NumberField.IncrementButton />
+            </NumberField.Group>
+          </NumberField>
+
+          <NumberField
+            aria-label="置信度"
+            maxValue={1}
+            minValue={0}
+            step={0.05}
+            value={draft.confidence}
+            variant="secondary"
+            onChange={(value) => updateDraft({ confidence: clamp01(value ?? 0, 1) })}
+          >
+            <Label>置信度</Label>
+            <NumberField.Group>
+              <NumberField.DecrementButton />
+              <NumberField.Input />
+              <NumberField.IncrementButton />
+            </NumberField.Group>
+          </NumberField>
         </div>
-        <Toolbar aria-label="记忆操作">
-          <Button variant="secondary" onPress={() => void handleExportMarkdown()}>
-            <Download />
-            导出 Markdown
+
+        <TextField fullWidth onChange={(value) => updateDraft({ tagsText: value })} value={draft.tagsText}>
+          <Label>标签</Label>
+          <InputGroup fullWidth variant="secondary">
+            <InputGroup.Input placeholder="用逗号分隔" />
+          </InputGroup>
+        </TextField>
+
+        <div className="flex flex-wrap gap-2">
+          <Button type="button" variant="primary" onPress={() => void handleSave()}>
+            <Check size={16} />
+            保存
           </Button>
-          <Button isDisabled={loading} variant="secondary" onPress={() => void load()}>
-            <RefreshCw />
+          <Button type="button" variant="tertiary" onPress={cancelEdit}>
+            <X size={16} />
+            取消
+          </Button>
+        </div>
+      </div>
+    )
+  }
+
+  const renderMemoryItem = (item: AgentMemoryItem) => {
+    if (editingId === item.id) return <div key={item.id}>{renderEditor()}</div>
+
+    return (
+      <div className="rounded-lg border border-border bg-default p-3" key={item.id}>
+        <div className="flex flex-wrap items-center gap-2">
+          <Chip size="sm" variant="soft">{sourceLabel(item.sourceType)}</Chip>
+          {isAutoMemory(item) && <Chip size="sm" variant="soft">自动</Chip>}
+          {isPendingMemory(item) && <Chip color="warning" size="sm" variant="soft">待确认</Chip>}
+          <span className="text-xs text-muted">重要度 {formatScore(item.importance)}</span>
+          <span className="text-xs text-muted">置信度 {formatScore(item.confidence)}</span>
+        </div>
+
+        <Typography.Paragraph className="mt-2 whitespace-pre-wrap wrap-break-word text-sm leading-6">
+          {item.content}
+        </Typography.Paragraph>
+
+        {item.tags.length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {item.tags.map((tag) => (
+              <Chip key={tag} size="sm" variant="soft">{tag}</Chip>
+            ))}
+          </div>
+        )}
+
+        <div className="mt-3 flex flex-wrap gap-2">
+          {isPendingMemory(item) && (
+            <Button size="sm" type="button" variant="secondary" onPress={() => void handleConfirmMemory(item)}>
+              <Check size={14} />
+              确认
+            </Button>
+          )}
+          <Button size="sm" type="button" variant="tertiary" onPress={() => startEdit(item)}>
+            <Pencil size={14} />
+            编辑
+          </Button>
+          <AlertDialog>
+            <Button size="sm" type="button" variant="danger">
+              <Trash2 size={14} />
+              删除
+            </Button>
+            <AlertDialog.Backdrop>
+              <AlertDialog.Container>
+                <AlertDialog.Dialog>
+                  <AlertDialog.CloseTrigger />
+                  <AlertDialog.Header>
+                    <AlertDialog.Icon status="danger" />
+                    <AlertDialog.Heading>删除这条记忆？</AlertDialog.Heading>
+                  </AlertDialog.Header>
+                  <AlertDialog.Body>
+                    <Typography.Paragraph size="sm">
+                      删除后，AI 不会再把这条内容作为长期记忆参考。此操作不可撤销。
+                    </Typography.Paragraph>
+                    <Typography.Paragraph size="sm" color="muted">
+                      {item.content}
+                    </Typography.Paragraph>
+                  </AlertDialog.Body>
+                  <AlertDialog.Footer>
+                    <Button slot="close" variant="tertiary">取消</Button>
+                    <Button slot="close" variant="danger" onPress={() => void handleDelete(item.id)}>
+                      删除
+                    </Button>
+                  </AlertDialog.Footer>
+                </AlertDialog.Dialog>
+              </AlertDialog.Container>
+            </AlertDialog.Backdrop>
+          </AlertDialog>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <Card>
+      <Card.Header className="flex-col items-start gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <Card.Title>长期记忆</Card.Title>
+          <Card.Description>只显示可修改的记忆字段。</Card.Description>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <Chip color="accent" size="sm" variant="soft">{count} 条</Chip>
+            <Chip size="sm" variant="soft">显示 {filteredItems.length}</Chip>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button type="button" variant="secondary" onPress={startCreate}>
+            <Plus size={16} />
+            新增
+          </Button>
+          <Button isDisabled={loading} type="button" variant="secondary" onPress={() => void load()}>
+            <RefreshCw className={loading ? 'animate-spin' : ''} size={16} />
             刷新
           </Button>
-          <Button variant="secondary" onPress={() => void handleConsolidate()}>
-            <Sparkles />
-            整理去冗余
+          <Button isDisabled={consolidating} type="button" variant="secondary" onPress={() => void handleConsolidate()}>
+            <Sparkles size={16} />
+            {consolidating ? '整理中...' : '整理'}
           </Button>
-        </Toolbar>
-      </Surface>
+          <Button isDisabled={exporting} type="button" variant="secondary" onPress={() => void handleExportMarkdown()}>
+            <Download size={16} />
+            导出
+          </Button>
+        </div>
+      </Card.Header>
 
-      <Surface className="mb-4 flex flex-wrap items-center gap-2" variant="transparent">
-        <ButtonGroup variant="tertiary">
-          <Button onPress={() => setFilter('all')} variant={filter === 'all' ? 'secondary' : 'tertiary'}>全部</Button>
-          <Button onPress={() => setFilter('auto')} variant={filter === 'auto' ? 'secondary' : 'tertiary'}>自动</Button>
-          <Button onPress={() => setFilter('pending')} variant={filter === 'pending' ? 'secondary' : 'tertiary'}>待确认</Button>
-          <Button onPress={() => setFilter('high')} variant={filter === 'high' ? 'secondary' : 'tertiary'}>高重要度</Button>
-        </ButtonGroup>
-        <Description>当前显示 {filteredItems.length} / {count} 条。</Description>
-      </Surface>
+      <Card.Content className="space-y-4">
+        <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_220px]">
+          <TextField fullWidth onChange={setQuery} value={query}>
+            <Label>搜索</Label>
+            <InputGroup fullWidth variant="secondary">
+              <InputGroup.Prefix>
+                <Search size={15} />
+              </InputGroup.Prefix>
+              <InputGroup.Input placeholder="搜索内容或标签" />
+            </InputGroup>
+          </TextField>
+          {renderTypeSelect(typeFilter, setTypeFilter)}
+        </div>
 
-      {filteredItems.length === 0 ? (
-        <Surface variant="transparent">
-          {loading ? (
-            <>
-              <Skeleton className="h-5 w-48 rounded-lg" />
-              <Skeleton className="h-4 w-80 rounded-lg" />
-              <Skeleton className="h-4 w-64 rounded-lg" />
-            </>
-          ) : (
-            <Typography.Paragraph color="muted">
-              还没有任何长期记忆。和 AI 聊聊你的偏好 / 身份，它会自动记下来。
-            </Typography.Paragraph>
-          )}
-        </Surface>
-      ) : (
-        <Table>
-          <Table.ScrollContainer>
-            <Table.Content aria-label="AI 长期记忆">
-              <Table.Header>
-                <Table.Column isRowHeader>内容</Table.Column>
-                <Table.Column>类型</Table.Column>
-                <Table.Column>重要度</Table.Column>
-                <Table.Column>置信度</Table.Column>
-                <Table.Column>标签</Table.Column>
-                <Table.Column>关于</Table.Column>
-                <Table.Column>操作</Table.Column>
-              </Table.Header>
-              <Table.Body>
-                {filteredItems.map((m) => {
-                  const isEditing = editingId === m.id && draft
-                  return (
-                    <Table.Row key={m.id} id={m.id} textValue={m.content}>
-                      <Table.Cell>
-                        {isEditing ? (
-                          <TextArea
-                            aria-label="记忆内容"
-                            fullWidth
-                            rows={3}
-                            value={draft.content}
-                            variant="secondary"
-                            onChange={(event) => setDraft({ ...draft, content: event.target.value })}
-                          />
-                        ) : (
-                          <Typography.Paragraph size="sm">{m.content}</Typography.Paragraph>
-                        )}
-                      </Table.Cell>
-                      <Table.Cell>
-                        {isEditing ? (
-                          <Select
-                            aria-label="记忆类型"
-                            fullWidth
-                            value={draft.sourceType}
-                            variant="secondary"
-                            onChange={(value) => setDraft({ ...draft, sourceType: memoryKindFromValue(value) })}
-                          >
-                            <Select.Trigger>
-                              <Select.Value />
-                              <Select.Indicator />
-                            </Select.Trigger>
-                            <Select.Popover>
-                              <ListBox>
-                                <ListBox.Item id="profile" textValue="画像">
-                                  画像
-                                  <ListBox.ItemIndicator />
-                                </ListBox.Item>
-                                <ListBox.Item id="fact" textValue="事实">
-                                  事实
-                                  <ListBox.ItemIndicator />
-                                </ListBox.Item>
-                                <ListBox.Item id="relationship" textValue="关系">
-                                  关系
-                                  <ListBox.ItemIndicator />
-                                </ListBox.Item>
-                              </ListBox>
-                            </Select.Popover>
-                          </Select>
-                        ) : (
-                          <Chip size="sm">{kindLabel(m.sourceType)}</Chip>
-                        )}
-                      </Table.Cell>
-                      <Table.Cell>
-                        {isEditing ? (
-                          <NumberField
-                            aria-label="重要度"
-                            maxValue={1}
-                            minValue={0}
-                            step={0.05}
-                            value={draft.importance}
-                            variant="secondary"
-                            onChange={(value) => setDraft({ ...draft, importance: value ?? 0 })}
-                          >
-                            <Label>重要度</Label>
-                            <NumberField.Group>
-                              <NumberField.DecrementButton />
-                              <NumberField.Input />
-                              <NumberField.IncrementButton />
-                            </NumberField.Group>
-                          </NumberField>
-                        ) : (
-                          <Typography type="body-sm">{Math.round(m.importance * 100) / 100}</Typography>
-                        )}
-                      </Table.Cell>
-                      <Table.Cell>
-                        {isEditing ? (
-                          <NumberField
-                            aria-label="置信度"
-                            maxValue={1}
-                            minValue={0}
-                            step={0.05}
-                            value={draft.confidence}
-                            variant="secondary"
-                            onChange={(value) => setDraft({ ...draft, confidence: value ?? 0 })}
-                          >
-                            <Label>置信度</Label>
-                            <NumberField.Group>
-                              <NumberField.DecrementButton />
-                              <NumberField.Input />
-                              <NumberField.IncrementButton />
-                            </NumberField.Group>
-                          </NumberField>
-                        ) : (
-                          <Typography type="body-sm">{Math.round(m.confidence * 100) / 100}</Typography>
-                        )}
-                      </Table.Cell>
-                      <Table.Cell>
-                        {isEditing ? (
-                          <Input
-                            aria-label="记忆标签"
-                            fullWidth
-                            placeholder="用逗号分隔"
-                            value={draft.tagsText}
-                            variant="secondary"
-                            onChange={(event) => setDraft({ ...draft, tagsText: event.target.value })}
-                          />
-                        ) : (
-                          <>
-                            {m.tags?.includes('auto') && <Chip size="sm">自动</Chip>}
-                            {m.tags?.includes('pending') && <Chip color="warning" size="sm" variant="soft">待确认</Chip>}
-                            {m.tags?.filter((tag) => tag !== 'auto').map((tag) => (
-                              tag === 'pending' ? null : <Chip key={tag} size="sm">{tag}</Chip>
-                            ))}
-                          </>
-                        )}
-                      </Table.Cell>
-                      <Table.Cell>
-                        {m.sessionId ? <Typography type="body-sm" truncate>关于 {m.sessionId}</Typography> : <Typography type="body-sm" color="muted">全局</Typography>}
-                      </Table.Cell>
-                      <Table.Cell>
-                        <ButtonGroup variant="tertiary">
-                          <Button isIconOnly aria-label="查看详情" onPress={() => setSelectedId(m.id)}>
-                            <Eye />
-                          </Button>
-                          {!isEditing && isPendingMemory(m) && (
-                            <Button isIconOnly aria-label="确认这条自动记忆" onPress={() => void handleConfirmMemory(m)}>
-                              <Check />
-                            </Button>
-                          )}
-                          {isEditing ? (
-                            <>
-                              <Button isIconOnly aria-label="保存修改" onPress={() => void handleSave(m.id)}>
-                                <Check />
-                              </Button>
-                              <Button isIconOnly aria-label="取消编辑" onPress={cancelEdit}>
-                                <X />
-                              </Button>
-                            </>
-                          ) : (
-                            <Button isIconOnly aria-label="编辑这条记忆" onPress={() => startEdit(m)}>
-                              <Pencil />
-                            </Button>
-                          )}
-                          <AlertDialog>
-                            <Button isIconOnly aria-label="删除这条记忆" variant="danger">
-                              <Trash2 />
-                            </Button>
-                            <AlertDialog.Backdrop>
-                              <AlertDialog.Container>
-                                <AlertDialog.Dialog>
-                                  <AlertDialog.CloseTrigger />
-                                  <AlertDialog.Header>
-                                    <AlertDialog.Icon status="danger" />
-                                    <AlertDialog.Heading>删除这条记忆？</AlertDialog.Heading>
-                                  </AlertDialog.Header>
-                                  <AlertDialog.Body>
-                                    <Typography.Paragraph size="sm">
-                                      删除后，AI 不会再把这条内容作为长期记忆参考。此操作不可撤销。
-                                    </Typography.Paragraph>
-                                    <Typography.Paragraph size="sm" color="muted">
-                                      {m.content}
-                                    </Typography.Paragraph>
-                                  </AlertDialog.Body>
-                                  <AlertDialog.Footer>
-                                    <Button slot="close" variant="tertiary">取消</Button>
-                                    <Button slot="close" variant="danger" onPress={() => void handleDelete(m.id)}>
-                                      删除
-                                    </Button>
-                                  </AlertDialog.Footer>
-                                </AlertDialog.Dialog>
-                              </AlertDialog.Container>
-                            </AlertDialog.Backdrop>
-                          </AlertDialog>
-                        </ButtonGroup>
-                      </Table.Cell>
-                    </Table.Row>
-                  )
-                })}
-              </Table.Body>
-            </Table.Content>
-          </Table.ScrollContainer>
-        </Table>
-      )}
-      {selectedItem && (
-        <Surface className="mt-4 space-y-2" variant="transparent">
-          <div className="flex items-center justify-between gap-3">
-            <Typography.Heading level={3} className="text-lg font-semibold text-foreground">
-              记忆详情 #{selectedItem.id}
-            </Typography.Heading>
-            <Button isIconOnly aria-label="关闭详情" variant="tertiary" onPress={() => setSelectedId(null)}>
-              <X />
-            </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <ButtonGroup variant="tertiary">
+            <Button onPress={() => setStatusFilter('all')} variant={statusFilter === 'all' ? 'secondary' : 'tertiary'}>全部</Button>
+            <Button onPress={() => setStatusFilter('auto')} variant={statusFilter === 'auto' ? 'secondary' : 'tertiary'}>自动</Button>
+            <Button onPress={() => setStatusFilter('pending')} variant={statusFilter === 'pending' ? 'secondary' : 'tertiary'}>待确认</Button>
+          </ButtonGroup>
+        </div>
+
+        {editingId === 'new' && renderEditor()}
+
+        {loading && items.length === 0 ? (
+          <div className="space-y-3">
+            <Skeleton className="h-24 rounded-lg" />
+            <Skeleton className="h-24 rounded-lg" />
+            <Skeleton className="h-24 rounded-lg" />
           </div>
-          <div className="grid gap-2 text-sm md:grid-cols-2">
-            <Typography.Paragraph size="sm">类型：{kindLabel(selectedItem.sourceType)}</Typography.Paragraph>
-            <Typography.Paragraph size="sm">关于：{selectedItem.sessionId || selectedItem.contactId || selectedItem.groupId || '全局'}</Typography.Paragraph>
-            <Typography.Paragraph size="sm">重要度：{selectedItem.importance.toFixed(2)}</Typography.Paragraph>
-            <Typography.Paragraph size="sm">置信度：{selectedItem.confidence.toFixed(2)}</Typography.Paragraph>
-            <Typography.Paragraph size="sm">创建：{formatTime(selectedItem.createdAt)}</Typography.Paragraph>
-            <Typography.Paragraph size="sm">更新：{formatTime(selectedItem.updatedAt)}</Typography.Paragraph>
+        ) : filteredItems.length === 0 ? (
+          <Typography.Paragraph color="muted" size="sm">
+            没有匹配的记忆。
+          </Typography.Paragraph>
+        ) : (
+          <div className="space-y-3">
+            {filteredItems.map(renderMemoryItem)}
           </div>
-          <Typography.Paragraph size="sm">{selectedItem.content}</Typography.Paragraph>
-          {selectedItem.sourceRefs && selectedItem.sourceRefs.length > 0 && (
-            <div className="space-y-1">
-              <Typography.Paragraph size="sm" color="muted">证据引用</Typography.Paragraph>
-              {selectedItem.sourceRefs.map((ref) => (
-                <Typography.Paragraph key={`${ref.sessionId}:${ref.localId}:${ref.sortSeq}`} size="sm" color="muted">
-                  {ref.sessionId} / {ref.localId} / {ref.excerpt || '无摘要'}
-                </Typography.Paragraph>
-              ))}
-            </div>
-          )}
-        </Surface>
-      )}
-    </>
+        )}
+      </Card.Content>
+    </Card>
   )
 }
