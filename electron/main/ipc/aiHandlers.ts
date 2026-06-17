@@ -11,8 +11,6 @@ import type { PersonaNotes, PersonaRecord, PersonaTtsVoiceBinding } from '../../
 const agentAborters = new Map<string, AbortController>()
 const ttsStreamAborters = new Map<string, AbortController>()
 const AGENT_RUN_PROXY_CACHE_TTL_MS = 5 * 60 * 1000
-// 准备阶段重排超时：超时直接走降级路径（不影响正确性），别让慢服务拖住首包。
-const AGENT_PREP_RERANK_TIMEOUT_MS = 800
 const AGENT_PREP_PROGRESS_TITLE = '大模型准备中'
 
 let agentRunProxyRefreshedAt = 0
@@ -151,37 +149,80 @@ function errorToLogData(error: unknown): Record<string, unknown> {
   return { message: String(error) }
 }
 
-function selectionTokens(value: string): Set<string> {
-  const normalized = value.replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase()
-  const tokens = new Set<string>()
-  for (const match of normalized.matchAll(/[a-z0-9][a-z0-9_-]{1,}/g)) {
-    tokens.add(match[0].replace(/[_-]+/g, ''))
-    for (const part of match[0].split(/[_-]+/)) {
-      if (part.length >= 2) tokens.add(part)
-    }
-  }
-  for (const match of value.matchAll(/[\u4e00-\u9fff]+/g)) {
-    const text = match[0]
-    for (let i = 0; i < text.length - 1; i += 1) tokens.add(text.slice(i, i + 2))
-    if (text.length === 1) tokens.add(text)
-  }
-  return tokens
-}
+const PERSONA_VOICE_MARKER_RE = /^[\[【]\s*(?:语音|voice)\s*[\]】]\s*/i
 
-function scoreNameDescription(query: string, parts: Array<{ text: string; weight: number }>): number {
-  const queryTokens = selectionTokens(query)
-  if (queryTokens.size === 0) return 0
-  let score = 0
-  for (const part of parts) {
-    const tokens = selectionTokens(part.text)
-    for (const token of queryTokens) {
-      if (tokens.has(token)) score += part.weight * (token.length >= 4 ? 2 : 1)
+function createPersonaVoiceCachePrewarmer(input: {
+  runId: string
+  sessionId: string
+  ttsVoice: PersonaTtsVoiceBinding | null
+  instructions?: string
+  signal?: AbortSignal
+  logger?: { warn?(category: string, message: string, data?: any): void }
+}): (chunk: unknown) => void {
+  const textById = new Map<string, string>()
+  const queued = new Set<string>()
+
+  const prewarm = (rawText: string) => {
+    const match = rawText.match(PERSONA_VOICE_MARKER_RE)
+    if (!match || input.signal?.aborted) return
+
+    const text = rawText.slice(match[0].length).trim()
+    if (!text) return
+
+    const key = `${input.ttsVoice?.provider || 'default'}:${input.ttsVoice?.model || ''}:${input.ttsVoice?.voice || ''}:${input.instructions || ''}:${text}`
+    if (queued.has(key)) return
+    queued.add(key)
+
+    void (async () => {
+      try {
+        const { resolvePersonaVoiceTtsConfig, synthesizeSpeech } = await import('../../services/ai/ttsService')
+        const configPatch = input.instructions ? { instructions: input.instructions } : undefined
+        const config = input.ttsVoice
+          ? resolvePersonaVoiceTtsConfig(input.ttsVoice, configPatch as any)
+          : configPatch
+        const result = await synthesizeSpeech(text, config ? { config: config as any, useCache: true, signal: input.signal } : { useCache: true, signal: input.signal })
+        if (!result.success) {
+          input.logger?.warn?.('Persona', '分身语音预合成失败', {
+            runId: input.runId,
+            sessionId: input.sessionId,
+            error: result.error,
+            errorCode: result.errorCode,
+          })
+        }
+      } catch (error) {
+        input.logger?.warn?.('Persona', '分身语音预合成异常', {
+          runId: input.runId,
+          sessionId: input.sessionId,
+          ...errorToLogData(error),
+        })
+      }
+    })()
+  }
+
+  return (chunk: unknown) => {
+    if (!chunk || typeof chunk !== 'object') return
+    const item = chunk as { type?: unknown; id?: unknown; delta?: unknown }
+    const type = String(item.type || '')
+    const id = typeof item.id === 'string' ? item.id : ''
+    if (!id) return
+
+    if (type === 'text-start') {
+      textById.set(id, '')
+    } else if (type === 'text-delta') {
+      textById.set(id, `${textById.get(id) || ''}${String(item.delta || '')}`)
+    } else if (type === 'text-end') {
+      const text = textById.get(id) || ''
+      textById.delete(id)
+      prewarm(text)
     }
   }
-  return score
 }
 
 export function registerAiHandlers(ctx: MainProcessContext): void {
+  void import('../../services/agent/agentCapabilityService')
+    .then(({ agentCapabilityService }) => agentCapabilityService.setContext(ctx))
+    .catch(() => undefined)
+
   // ========= AI Agent（跑在独立 utilityProcess 子进程，主进程仅做 broker）=========
   ipcMain.handle('agent:run', async (event, payload: {
     runId: string
@@ -269,18 +310,21 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
       sendPrepProgress()
       const { agentProcessService } = await import('../../services/agent/agentProcessService')
       agentProcessService.setLogger(logger)
-      const { resolveProviderConfig } = await import('../../services/agent/resolveProviderConfig')
-      const { refreshResolvedProxyUrl } = await import('../../services/ai/proxyFetch')
+      const { agentProfileService } = await import('../../services/agent/agentProfileService')
       const { convertToModelMessages } = await import('ai')
       markPerf('加载主进程服务模块')
-      stage = 'refresh_proxy'
+      stage = 'resolve_agent_profile'
       sendPrepProgress()
-      await refreshAgentRunProxyCached(refreshResolvedProxyUrl) // 主进程探测系统代理并持久化，供子进程 agent/嵌入读取
-      markPerf('系统代理探测')
-      stage = 'resolve_provider'
-      sendPrepProgress()
-      const providerConfig = resolveProviderConfig(payload.modelConfig)
-      markPerf('解析模型配置')
+      const profile = await timedTask('解析 Agent Profile', agentProfileService.resolve({
+        mode: 'app',
+        scope,
+        modelConfig: payload.modelConfig,
+        toolProfile,
+        codeWorkspace,
+        includeMcpSkills: true,
+      }))
+      const providerConfig = profile.providerConfig
+      markPerf('解析 Agent Profile', `MCP ${profile.mcpTools.length} 个 / 技能 ${profile.skills.length} 个`)
       stage = 'convert_messages'
       sendPrepProgress()
       const uiMessages = shouldStripProviderMetadata(providerConfig)
@@ -288,103 +332,10 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
         : payload.messages
       const messages = await convertToModelMessages(uiMessages)
       markPerf('整理消息', `${messages.length} 条`)
-      const lastUserText = lastUserTextFromUiMessages(payload.messages)
-      stage = 'load_context_services'
+      stage = 'inject_tools_and_skills'
       sendPrepProgress()
-      const { mcpClientService } = await import('../../services/mcpClientService')
-      const { buildReadOnlyMcpToolDescriptors } = await import('../../services/agent/mcpToolPolicy')
-      const { skillManagerService } = await import('../../services/skillManagerService')
-      const { rerankCandidates } = await import('../../services/ai/rerankService')
-      const {
-        fingerprintMcpToolSchemas,
-        fingerprintSkills,
-        getCachedMcpToolDescriptors,
-        getCachedMcpSelection,
-        getCachedSkillSelection,
-        setCachedMcpToolDescriptors,
-        setCachedMcpSelection,
-        setCachedSkillSelection,
-      } = await import('../../services/agent/runtimeCache')
-      const connectedMcpToolSchemas = mcpClientService.getConnectedToolSchemas()
-      const mcpToolVersion = fingerprintMcpToolSchemas(connectedMcpToolSchemas)
-      let readOnlyMcpTools = getCachedMcpToolDescriptors(mcpToolVersion)
-      if (!readOnlyMcpTools) {
-        readOnlyMcpTools = buildReadOnlyMcpToolDescriptors(connectedMcpToolSchemas)
-        setCachedMcpToolDescriptors(mcpToolVersion, readOnlyMcpTools)
-      }
-      const skillManifestVersion = fingerprintSkills(skillManagerService.listSkills())
-      markPerf('加载上下文服务模块', `只读 MCP 工具 ${readOnlyMcpTools.length} 个`)
-      stage = 'select_tools_and_skills'
-      sendPrepProgress()
-      // MCP 工具筛选+重排 与 技能选择 互相独立，并行执行；运行期不再使用向量，
-      // 只用名称和简介做轻量候选选择，避免 embedding 请求拖慢或误召回。
-      const selectMcpToolsTask = async () => {
-        if (readOnlyMcpTools.length === 0) {
-          return {
-            mcpTools: [],
-            mcpRerankMeta: { enabled: false, applied: false, candidateCount: 0, resultCount: 0 },
-            mcpCandidates: [],
-            mcpCacheHit: false,
-          }
-        }
-        const cached = getCachedMcpSelection(lastUserText, mcpToolVersion)
-        if (cached) {
-          return {
-            mcpTools: cached,
-            mcpRerankMeta: { enabled: false, applied: false, candidateCount: readOnlyMcpTools.length, resultCount: cached.length },
-            mcpCandidates: readOnlyMcpTools,
-            mcpCacheHit: true,
-          }
-        }
-        const scoredCandidates = readOnlyMcpTools
-          .map((tool) => ({
-            tool,
-            score: scoreNameDescription(lastUserText, [
-              { text: `${tool.serverName} ${tool.toolName} ${tool.name}`, weight: 3 },
-              { text: tool.description || '', weight: 2 },
-            ]),
-          }))
-          .filter((item) => item.score > 0)
-          .sort((a, b) => b.score - a.score || a.tool.name.localeCompare(b.tool.name))
-        const candidates = scoredCandidates.length > 0
-          ? scoredCandidates.slice(0, 24).map((item) => item.tool)
-          : readOnlyMcpTools
-        if (candidates.length === 0) {
-          setCachedMcpSelection(lastUserText, mcpToolVersion, [])
-          return {
-            mcpTools: [],
-            mcpRerankMeta: { enabled: false, applied: false, candidateCount: 0, resultCount: 0 },
-            mcpCandidates: candidates,
-            mcpCacheHit: false,
-          }
-        }
-        const { items, meta } = await rerankCandidates(
-          lastUserText,
-          candidates.map((tool) => ({
-            item: tool,
-            text: [
-              `MCP ${tool.serverName}/${tool.toolName}`,
-              tool.name,
-              tool.description || '',
-            ].filter(Boolean).join('\n'),
-          })),
-          { topN: 8, timeoutMsOverride: AGENT_PREP_RERANK_TIMEOUT_MS },
-        )
-        setCachedMcpSelection(lastUserText, mcpToolVersion, items)
-        return { mcpTools: items, mcpRerankMeta: meta, mcpCandidates: candidates, mcpCacheHit: false }
-      }
-      const selectSkillsTask = async () => {
-        const cached = getCachedSkillSelection(lastUserText, skillManifestVersion)
-        if (cached) return { skills: cached, skillCacheHit: true }
-        const skills = await skillManagerService.selectSkillsForAgent(lastUserText)
-        setCachedSkillSelection(lastUserText, skillManifestVersion, skills)
-        return { skills, skillCacheHit: false }
-      }
-      const [{ mcpTools, mcpRerankMeta, mcpCandidates, mcpCacheHit }, { skills, skillCacheHit }] = await Promise.all([
-        timedTask('MCP 工具筛选（名称简介+重排）', selectMcpToolsTask()),
-        timedTask('技能筛选（名称简介+重排）', selectSkillsTask()),
-      ])
-      markPerf('工具与技能筛选', `MCP ${mcpTools.length} 个${mcpCacheHit ? '·缓存' : ''} / 技能 ${skills.length} 个${skillCacheHit ? '·缓存' : ''}`)
+      const mcpTools = profile.mcpTools
+      const skills = profile.skills
       sendPrepProgress()
       if (mcpTools.length > 0 || skills.length > 0) {
         console.info('[agent:run] injected context', {
@@ -397,16 +348,16 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
         elapsedMs: Date.now() - startedAt,
         provider: providerToLogData(providerConfig),
         modelMessageCount: messages.length,
-        readOnlyMcpToolCount: readOnlyMcpTools.length,
-        mcpCandidateCount: mcpCandidates.length,
+        readOnlyMcpToolCount: profile.logMeta.readOnlyMcpToolCount,
+        mcpCandidateCount: profile.logMeta.readOnlyMcpToolCount,
         selectedMcpToolCount: mcpTools.length,
         selectedMcpTools: mcpTools.map((tool) => `${tool.serverName}/${tool.toolName}`),
-        mcpSelectionCacheHit: mcpCacheHit,
-        mcpRerankApplied: mcpRerankMeta.applied,
-        mcpRerankError: mcpRerankMeta.error || null,
+        mcpSelectionMode: profile.logMeta.mcpSelectionMode,
+        mcpRerankApplied: false,
+        mcpRerankError: null,
         selectedSkillCount: skills.length,
         selectedSkills: skills.map((skill) => skill.name),
-        skillSelectionCacheHit: skillCacheHit,
+        skillSelectionMode: profile.logMeta.skillSelectionMode,
       })
       stage = 'run_agent_process'
       sendPrepProgress()
@@ -434,7 +385,17 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
       let firstChunkSeen = false
       let firstModelOutputSeen = false
       await agentProcessService.run(
-        { messages, providerConfig, scope, mcpTools, skills, planMode: payload.planMode === true, toolProfile, codeWorkspace },
+        {
+          messages,
+          providerConfig,
+          scope: profile.scope,
+          mcpTools,
+          skills,
+          planMode: payload.planMode === true,
+          toolProfile: profile.toolProfile,
+          codeWorkspace: profile.codeWorkspace,
+          allowWechatReplyMedia: false,
+        },
         (chunk) => {
           chunkCount += 1
           lastActivityAt = Date.now()
@@ -1107,6 +1068,18 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
 
       const { agentProcessService } = await import('../../services/agent/agentProcessService')
       agentProcessService.setLogger(logger)
+      const prewarmPersonaVoice = createPersonaVoiceCachePrewarmer({
+        runId,
+        sessionId,
+        ttsVoice: persona.ttsVoice,
+        instructions: persona.card.ttsInstructions,
+        signal: aborter.signal,
+        logger,
+      })
+      const sendPersonaChunk = (chunk: unknown) => {
+        send(chunk)
+        prewarmPersonaVoice(chunk)
+      }
       await agentProcessService.personaChat(
         {
           providerConfig,
@@ -1123,7 +1096,7 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
           },
           messages,
         },
-        send,
+        sendPersonaChunk,
         sendProgress,
         aborter.signal,
       )

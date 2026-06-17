@@ -265,7 +265,7 @@ const CODE_WORKSPACE_APPROVAL_POLICY_OPTIONS: Array<{
   {
     value: 'full-access',
     label: '完全访问',
-    description: '代码工作区内不再请求批准',
+    description: '本机文件读写和命令不再请求批准',
     icon: ShieldCheck,
   },
 ]
@@ -914,8 +914,27 @@ const TOOL_LABELS: Record<string, string> = {
   search_stickers: '翻表情包',
   send_sticker: '发表情包',
   send_random_image: '抽一张图片',
-  send_wechat_media: '发送微信媒体',
+  send_wechat_media: '回复微信媒体',
+  send_wechat_file: '回复微信文件',
   export_chat: '导出聊天记录',
+  find_files: '查找本机文件',
+  search_local_files: '搜索本机内容',
+  index_local_files: '索引本机文件',
+  add_knowledge_source: '加入资料库',
+  search_knowledge: '搜索资料库',
+  remove_knowledge_source: '移除资料来源',
+  create_artifact: '生成产物文件',
+  create_task: '创建任务',
+  list_tasks: '查看任务',
+  update_task: '更新任务',
+  cancel_task: '取消任务',
+  run_task_now: '立即运行任务',
+  list_audit_logs: '查看审计',
+  rollback_operation: '回滚操作',
+  desktop_screenshot: '桌面截图',
+  desktop_ocr: '桌面 OCR',
+  audit_memories: '记忆体检',
+  apply_memory_fix: '修复记忆',
   persona_control: '数字分身',
   auto_memory: '自动记忆',
   final_review: '最终审核',
@@ -3500,6 +3519,11 @@ export default function AgentPage() {
     )
   }, [])
 
+  const handleRecordsOpenChange = useCallback((open: boolean) => {
+    setRecordsOpen(open)
+    if (open) void refreshConversationRecords()
+  }, [refreshConversationRecords])
+
   const persistConversationMessages = useCallback(async (
     targetId: number | null,
     nextMessages: UIMessage[],
@@ -4142,7 +4166,7 @@ export default function AgentPage() {
               state={codeWorkspaceState}
             />
             <div className="flex items-center gap-1.5">
-              <Dropdown isOpen={recordsOpen} onOpenChange={setRecordsOpen}>
+              <Dropdown isOpen={recordsOpen} onOpenChange={handleRecordsOpenChange}>
                 <HeroButton
                   aria-label="对话记录"
                   className="group relative size-9 overflow-visible p-0"
@@ -4588,7 +4612,7 @@ export default function AgentPage() {
                 sessions={sessions}
               />
               <PromptInputTextarea
-                className="pt-1.5 pb-2"
+                className="pt-3 pb-2"
                 placeholder="问问你的聊天记录，Enter 发送，Shift + Enter 换行…"
               />
             </PromptInputBody>

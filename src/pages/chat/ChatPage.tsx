@@ -1,5 +1,6 @@
-﻿import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { MessageSquare } from 'lucide-react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import { Button } from '@heroui/react'
+import { ImagePlus, MessageSquare, X } from 'lucide-react'
 import { useChatStore, MAX_ACTIVE_MESSAGES } from '../../stores/chatStore'
 import { useUpdateStatusStore } from '../../stores/updateStatusStore'
 import ChatBackground from '../../components/ChatBackground'
@@ -12,7 +13,6 @@ import { BatchTranscribeModal } from './components/BatchTranscribeModal'
 import { ChatHeader } from './components/ChatHeader'
 import { MessageListVirtual } from './components/MessageListVirtual'
 import { SessionSidebar } from './components/SessionSidebar'
-import { SharePosterModal } from './components/SharePosterModal'
 import { ContextMenuPortal } from './components/portals/ContextMenuPortal'
 import { EnlargeViewModal } from './components/portals/EnlargeViewModal'
 import { MessageInfoModal } from './components/portals/MessageInfoModal'
@@ -37,6 +37,55 @@ function getMessageCacheKey(message: Message): string {
 // 减小单次 prepend 的渲染阻塞（一次性 mount 50 条约卡 180ms，25 条约减半）。
 const INITIAL_PAGE_SIZE = 50
 const HISTORY_PAGE_SIZE = 25
+const IMAGE_PREWARM_LIMIT = 40
+
+type ImagePrewarmPayload = {
+  sessionId?: string
+  imageMd5?: string
+  imageDatName?: string
+  createTime?: number
+}
+
+function buildImagePrewarmPayloads(messages: Message[], sessionId: string, limit = IMAGE_PREWARM_LIMIT): ImagePrewarmPayload[] {
+  const payloads: ImagePrewarmPayload[] = []
+  const seen = new Set<string>()
+
+  const addPayload = (payload: ImagePrewarmPayload) => {
+    const imageKey = payload.imageMd5 || payload.imageDatName
+    if (!imageKey) return
+    const dedupeKey = [
+      payload.sessionId || '',
+      imageKey,
+      payload.imageDatName || '',
+      payload.createTime || 0
+    ].join('|')
+    if (seen.has(dedupeKey)) return
+    seen.add(dedupeKey)
+    payloads.push(payload)
+  }
+
+  for (let i = messages.length - 1; i >= 0 && payloads.length < limit; i -= 1) {
+    const message = messages[i]
+    if (message.localType === 3 && (message.imageMd5 || message.imageDatName)) {
+      addPayload({
+        sessionId,
+        imageMd5: message.imageMd5 || undefined,
+        imageDatName: message.imageDatName || undefined,
+        createTime: message.createTime
+      })
+    }
+
+    if (message.quotedImageMd5) {
+      addPayload({
+        sessionId,
+        imageMd5: message.quotedImageMd5,
+        createTime: message.createTime
+      })
+    }
+  }
+
+  return payloads
+}
 
 function ChatPage(_props: ChatPageProps) {
   const [quoteStyle, setQuoteStyle] = useState<QuoteStyleConfig>('default')
@@ -105,6 +154,7 @@ function ChatPage(_props: ChatPageProps) {
   const searchInputRef = useRef<HTMLInputElement>(null)
   const sidebarRef = useRef<HTMLDivElement>(null)
   const messagesRef = useRef<Message[]>([])
+  const imagePrewarmSignatureRef = useRef('')
   const isLoadingMoreRef = useRef(false)
   const scrollToBottomAfterRenderRef = useRef(false)
   // 虚拟列表滚动信号：ChatPage 表达"该置底/置顶"的意图，递增令 MessageListVirtual 用 scrollToIndex 落点
@@ -142,13 +192,10 @@ function ChatPage(_props: ChatPageProps) {
   const {
     contextMenu,
     setContextMenu,
-    isMenuClosing,
-    setIsMenuClosing,
     closeContextMenu
   } = useContextMenuState()
   const [selectedMessages, setSelectedMessages] = useState<Set<number>>(new Set())
   const [selectMode, setSelectMode] = useState(false)
-  const [showPoster, setShowPoster] = useState(false)
   const [showEnlargeView, setShowEnlargeView] = useState<{ message: Message; content: string } | null>(null)
   const { showTopToast } = useTopToast()
   const [showMessageInfo, setShowMessageInfo] = useState<Message | null>(null) // 消息信息弹窗
@@ -203,7 +250,6 @@ function ChatPage(_props: ChatPageProps) {
 
   const exitSelectMode = useCallback(() => {
     setSelectMode(false)
-    setShowPoster(false)
     setSelectedMessages(new Set())
   }, [])
 
@@ -219,7 +265,6 @@ function ChatPage(_props: ChatPageProps) {
   // 切换会话时退出多选模式
   useEffect(() => {
     setSelectMode(false)
-    setShowPoster(false)
     setSelectedMessages(new Set())
   }, [currentSessionId])
 
@@ -227,6 +272,33 @@ function ChatPage(_props: ChatPageProps) {
     () => messages.filter(m => selectedMessages.has(m.localId)),
     [messages, selectedMessages]
   )
+
+  const openPosterWindow = useCallback(async () => {
+    const session = sessions.find(s => s.username === currentSessionId)
+    if (!session) {
+      showTopToast('当前会话不存在', false)
+      return
+    }
+    if (posterMessages.length === 0) {
+      showTopToast('请先选择消息', false)
+      return
+    }
+    try {
+      const savedThemeId = await window.electronAPI.config.get('posterThemeId')
+      await window.electronAPI.config.set('posterStyleWindowContext', {
+        session,
+        messages: posterMessages,
+        myAvatarUrl,
+        themeId: typeof savedThemeId === 'string' ? savedThemeId : '',
+        updatedAt: Date.now()
+      })
+      await window.electronAPI.window.openPosterStyleWindow()
+      exitSelectMode()
+    } catch (error) {
+      console.error('[ChatPage] 打开海报窗口失败', error)
+      showTopToast('打开海报窗口失败', false)
+    }
+  }, [currentSessionId, exitSelectMode, myAvatarUrl, posterMessages, sessions, showTopToast])
 
   const exportVoiceMessage = useCallback(async (message: Message, session: ChatSession) => {
     try {
@@ -253,7 +325,7 @@ function ChatPage(_props: ChatPageProps) {
 
       const saveResult = await window.electronAPI.dialog.saveFile({
         title: '导出语音文件',
-        defaultPath: `${downloadsPath}\\${fileName}`,
+        defaultPath: `${downloadsPath}${window.navigator.platform.toLowerCase().includes('win') ? '\\' : '/'}${fileName}`,
         filters: [{ name: 'WAV 音频', extensions: ['wav'] }]
       })
 
@@ -1341,34 +1413,62 @@ function ChatPage(_props: ChatPageProps) {
     setShowBatchDecryptProgress(true)
     setBatchDecryptProgress({ current: 0, total: images.length })
 
-    let success = 0, fail = 0
-    for (let i = 0; i < images.length; i++) {
-      try {
-        const r = await window.electronAPI.image.decrypt({
-          sessionId: session.username,
-          imageMd5: images[i].imageMd5,
-          imageDatName: images[i].imageDatName,
-          createTime: images[i].createTime,
-          force: false
-        })
-        if (r?.success) success++
-        else fail++
-      } catch {
-        fail++
-      }
-      if (i % 5 === 0) await new Promise(r => setTimeout(r, 0))
-      setBatchDecryptProgress({ current: i + 1, total: images.length })
+    const payloads = images.map(img => ({
+      sessionId: session.username,
+      imageMd5: img.imageMd5,
+      imageDatName: img.imageDatName,
+      createTime: img.createTime
+    }))
+
+    let finalSuccess = 0
+    let finalFail = 0
+    const unsubscribeProgress = window.electronAPI.image.onBatchDecryptProgress((progress) => {
+      setBatchDecryptProgress({ current: progress.current, total: progress.total || images.length })
+      finalSuccess = progress.successCount
+      finalFail = progress.failCount
+    })
+
+    try {
+      const result = await window.electronAPI.image.batchDecrypt(payloads)
+      finalSuccess = result.successCount
+      finalFail = result.failCount
+      setBatchDecryptProgress({ current: result.current, total: result.total || images.length })
+    } catch {
+      finalFail = Math.max(finalFail, images.length - finalSuccess)
+    } finally {
+      unsubscribeProgress()
+      setIsBatchDecrypting(false)
+      setShowBatchDecryptProgress(false)
     }
 
-    setIsBatchDecrypting(false)
-    setShowBatchDecryptProgress(false)
-    alert(`解密完成：成功 ${success} 张，失败 ${fail} 张`)
+    alert(`解密完成：成功 ${finalSuccess} 张，失败 ${finalFail} 张`)
   }, [currentSessionId, sessions, batchImageMessages, batchImageSelectedDates])
 
   // 同步 messages 和 currentSessionId 到 ref，供自动更新使用
   useEffect(() => {
     messagesRef.current = messages
   }, [messages])
+
+  useEffect(() => {
+    if (!currentSessionId || hasImageKey === false || messages.length === 0) return
+
+    const payloads = buildImagePrewarmPayloads(messages, currentSessionId)
+    if (payloads.length === 0) return
+
+    const signature = payloads
+      .map(item => `${item.sessionId || ''}:${item.imageMd5 || ''}:${item.imageDatName || ''}:${item.createTime || 0}`)
+      .join('|')
+    if (signature === imagePrewarmSignatureRef.current) return
+    imagePrewarmSignatureRef.current = signature
+
+    const timer = window.setTimeout(() => {
+      void window.electronAPI.image.prewarm(payloads).catch(() => { })
+    }, 300)
+
+    return () => {
+      window.clearTimeout(timer)
+    }
+  }, [currentSessionId, hasImageKey, messages])
 
   useEffect(() => {
     currentOffsetRef.current = currentOffset
@@ -1624,21 +1724,25 @@ function ChatPage(_props: ChatPageProps) {
                 <div className="select-action-bar">
                   <span className="select-action-bar__count">已选 {selectedMessages.size} 条</span>
                   <div className="select-action-bar__btns">
-                    <button
-                      type="button"
+                    <Button
                       className="select-action-bar__btn"
-                      onClick={exitSelectMode}
+                      size="sm"
+                      variant="tertiary"
+                      onPress={exitSelectMode}
                     >
+                      <X className="size-4 shrink-0" />
                       取消
-                    </button>
-                    <button
-                      type="button"
+                    </Button>
+                    <Button
                       className="select-action-bar__btn select-action-bar__btn--primary"
-                      disabled={selectedMessages.size === 0}
-                      onClick={() => setShowPoster(true)}
+                      isDisabled={selectedMessages.size === 0}
+                      size="sm"
+                      variant="primary"
+                      onPress={() => void openPosterWindow()}
                     >
+                      <ImagePlus className="size-4 shrink-0" />
                       生成海报
-                    </button>
+                    </Button>
                   </div>
                 </div>
               )}
@@ -1666,10 +1770,7 @@ function ChatPage(_props: ChatPageProps) {
 
       <ContextMenuPortal
         contextMenu={contextMenu}
-        isMenuClosing={isMenuClosing}
-        closeContextMenu={closeContextMenu}
         setContextMenu={setContextMenu}
-        setIsMenuClosing={setIsMenuClosing}
         showTopToast={showTopToast}
         setShowEnlargeView={setShowEnlargeView}
         onEnterSelectMode={enterSelectMode}
@@ -1722,15 +1823,6 @@ function ChatPage(_props: ChatPageProps) {
         imageMessages={batchImageMessages}
       />
 
-      {showPoster && currentSession && (
-        <SharePosterModal
-          session={currentSession}
-          messages={posterMessages}
-          myAvatarUrl={myAvatarUrl}
-          onClose={() => setShowPoster(false)}
-          showTopToast={showTopToast}
-        />
-      )}
     </div>
   )
 }

@@ -372,6 +372,7 @@ export interface ElectronAPI {
     openChatWindow: () => Promise<boolean>
     openMomentsWindow: (filterUsername?: string) => Promise<boolean>
     openPersonaChatWindow: (sessionId: string) => Promise<boolean>
+    openPosterStyleWindow: () => Promise<boolean>
     onMomentsFilterUser: (callback: (username: string) => void) => () => void
     openAgreementWindow: () => Promise<boolean>
     openPurchaseWindow: () => Promise<boolean>
@@ -778,6 +779,9 @@ export interface ElectronAPI {
   image: {
     decrypt: (payload: { sessionId?: string; imageMd5?: string; imageDatName?: string; createTime?: number; force?: boolean; quick?: boolean }) => Promise<{ success: boolean; localPath?: string; error?: string }>
     resolveCache: (payload: { sessionId?: string; imageMd5?: string; imageDatName?: string; createTime?: number }) => Promise<{ success: boolean; localPath?: string; hasUpdate?: boolean; error?: string }>
+    prewarm: (payloads: Array<{ sessionId?: string; imageMd5?: string; imageDatName?: string; createTime?: number }>) => Promise<{ success: boolean; requested: number; enqueued: number; cacheHits: number; decrypted: number; failed: number; skipped: number; error?: string }>
+    batchDecrypt: (payloads: Array<{ sessionId?: string; imageMd5?: string; imageDatName?: string; createTime?: number }>) => Promise<{ success: boolean; requested: number; current: number; total: number; successCount: number; failCount: number; cacheHits: number; decrypted: number; skipped: number; error?: string }>
+    onBatchDecryptProgress: (callback: (data: { current: number; total: number; successCount: number; failCount: number; cacheHits: number; decrypted: number; skipped: number }) => void) => () => void
     onUpdateAvailable: (callback: (data: { cacheKey: string; imageMd5?: string; imageDatName?: string }) => void) => () => void
     onCacheResolved: (callback: (data: { cacheKey: string; imageMd5?: string; imageDatName?: string; localPath: string }) => void) => () => void
     deleteThumbnails: () => Promise<{ success: boolean; deleted: number; error?: string }>
@@ -1350,7 +1354,7 @@ export interface ElectronAPI {
   embedding: {
     getConfig: () => Promise<{ success: boolean; config?: EmbeddingConfig; error?: string }>
     setConfig: (patch: Partial<EmbeddingConfig>) => Promise<{ success: boolean; config?: EmbeddingConfig; error?: string }>
-    test: (cfg: EmbeddingConfig) => Promise<{ success: boolean; dimension?: number; error?: string }>
+    test: (cfg: EmbeddingConfig) => Promise<{ success: boolean; dimension?: number; error?: string; dimensionMismatch?: string }>
     sessionStatus: (sessionId: string) => Promise<{ success: boolean; enabled?: boolean; count?: number; store?: EmbeddingVectorStoreInfo; error?: string }>
     buildSession: (sessionId: string) => Promise<{ success: boolean; indexed?: number; error?: string }>
     onBuildProgress: (callback: (progress: EmbeddingBuildProgress) => void) => () => void
