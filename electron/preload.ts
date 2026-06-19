@@ -275,6 +275,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('memory:list', opts) as Promise<{ success: boolean; items?: unknown[]; stats?: { itemCount: number }; error?: string }>,
     listDiaries: (limit?: number) =>
       ipcRenderer.invoke('memory:listDiaries', limit) as Promise<{ success: boolean; diaries?: unknown[]; error?: string }>,
+    listBankNotes: (kind: 'tasks' | 'notes', limit?: number) =>
+      ipcRenderer.invoke('memory:listBankNotes', kind, limit) as Promise<{ success: boolean; notes?: unknown[]; error?: string }>,
+    readBankNote: (kind: 'tasks' | 'notes', fileName: string) =>
+      ipcRenderer.invoke('memory:readBankNote', kind, fileName) as Promise<{ success: boolean; note?: unknown; error?: string }>,
+    deleteBankNote: (kind: 'tasks' | 'notes', fileName: string) =>
+      ipcRenderer.invoke('memory:deleteBankNote', kind, fileName) as Promise<{ success: boolean; error?: string }>,
     readDiary: (date: string) =>
       ipcRenderer.invoke('memory:readDiary', date) as Promise<{ success: boolean; diary?: unknown; error?: string }>,
     deleteDiary: (date: string) =>
@@ -307,7 +313,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     setConfig: (patch: unknown) => ipcRenderer.invoke('embedding:setConfig', patch) as Promise<{ success: boolean; config?: unknown; error?: string }>,
     test: (cfg: unknown) => ipcRenderer.invoke('embedding:test', cfg) as Promise<{ success: boolean; dimension?: number; error?: string }>,
     sessionStatus: (sessionId: string) => ipcRenderer.invoke('embedding:sessionStatus', sessionId) as Promise<{ success: boolean; enabled?: boolean; count?: number; store?: unknown; error?: string }>,
-    buildSession: (sessionId: string) => ipcRenderer.invoke('embedding:buildSession', sessionId) as Promise<{ success: boolean; indexed?: number; error?: string }>,
+    buildSession: (sessionId: string) => ipcRenderer.invoke('embedding:buildSession', sessionId) as Promise<{ success: boolean; indexed?: number; mediaIndexed?: number; error?: string }>,
     onBuildProgress: (callback: (progress: unknown) => void): (() => void) => {
       const listener = (_e: unknown, progress: unknown) => callback(progress)
       ipcRenderer.on('embedding:buildProgress', listener)

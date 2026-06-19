@@ -10,6 +10,8 @@ export interface EmbeddingConfig {
   baseURL: string
   model: string
   dimension: number
+  imageEnabled?: boolean
+  imageInputMode?: 'auto' | 'image_base64' | 'content_part' | 'data_url'
 }
 
 export interface RerankConfig {
@@ -108,7 +110,9 @@ export interface EmbeddingVectorStoreInfo {
   sizeBytes: number
   updatedAtMs: number | null
   count: number
+  mediaCount?: number
   dimensions: number[]
+  mediaDimensions?: number[]
 }
 
 export interface ImageListItem {
@@ -278,6 +282,19 @@ export interface MemoryDiaryEntryInfo {
   title: string
   excerpt: string
   content?: string
+  updatedAt: number
+}
+
+export type MemoryBankNoteKind = 'tasks' | 'notes'
+
+export interface MemoryBankNoteInfo {
+  kind: MemoryBankNoteKind
+  fileName: string
+  title: string
+  excerpt: string
+  content?: string
+  status?: string
+  tags: string[]
   updatedAt: number
 }
 
@@ -1342,6 +1359,9 @@ export interface ElectronAPI {
     migrateLegacy: () => Promise<{ success: boolean; result?: MemoryMigrationResultInfo; error?: string }>
     list: (opts?: { sourceType?: AgentMemorySourceType; sourceTypes?: AgentMemorySourceType[]; sessionId?: string; tags?: string[]; withoutTags?: string[]; minConfidence?: number; limit?: number }) => Promise<{ success: boolean; items?: AgentMemoryItem[]; stats?: { itemCount: number }; error?: string }>
     listDiaries: (limit?: number) => Promise<{ success: boolean; diaries?: MemoryDiaryEntryInfo[]; error?: string }>
+    listBankNotes: (kind: MemoryBankNoteKind, limit?: number) => Promise<{ success: boolean; notes?: MemoryBankNoteInfo[]; error?: string }>
+    readBankNote: (kind: MemoryBankNoteKind, fileName: string) => Promise<{ success: boolean; note?: MemoryBankNoteInfo; error?: string }>
+    deleteBankNote: (kind: MemoryBankNoteKind, fileName: string) => Promise<{ success: boolean; error?: string }>
     readDiary: (date: string) => Promise<{ success: boolean; diary?: MemoryDiaryEntryInfo; error?: string }>
     deleteDiary: (date: string) => Promise<{ success: boolean; error?: string }>
     summarizeTodayDiary: () => Promise<{ success: boolean; alreadyExists?: boolean; diary?: MemoryDiaryEntryInfo; error?: string }>
@@ -1354,9 +1374,9 @@ export interface ElectronAPI {
   embedding: {
     getConfig: () => Promise<{ success: boolean; config?: EmbeddingConfig; error?: string }>
     setConfig: (patch: Partial<EmbeddingConfig>) => Promise<{ success: boolean; config?: EmbeddingConfig; error?: string }>
-    test: (cfg: EmbeddingConfig) => Promise<{ success: boolean; dimension?: number; error?: string; dimensionMismatch?: string }>
-    sessionStatus: (sessionId: string) => Promise<{ success: boolean; enabled?: boolean; count?: number; store?: EmbeddingVectorStoreInfo; error?: string }>
-    buildSession: (sessionId: string) => Promise<{ success: boolean; indexed?: number; error?: string }>
+    test: (cfg: EmbeddingConfig) => Promise<{ success: boolean; dimension?: number; imageDimension?: number; imageInputMode?: 'image_base64' | 'content_part' | 'data_url'; error?: string; dimensionMismatch?: string }>
+    sessionStatus: (sessionId: string) => Promise<{ success: boolean; enabled?: boolean; count?: number; mediaCount?: number; store?: EmbeddingVectorStoreInfo; error?: string }>
+    buildSession: (sessionId: string) => Promise<{ success: boolean; indexed?: number; mediaIndexed?: number; error?: string }>
     onBuildProgress: (callback: (progress: EmbeddingBuildProgress) => void) => () => void
   }
   rerank: {
