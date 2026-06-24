@@ -580,8 +580,8 @@ class ExportService {
       }
       case 10000: return this.cleanSystemMessage(content)
       case 244813135921: {
-        // 引用消息
-        const title = this.extractXmlValue(content, 'title')
+        // 引用消息（title 从原始内容提取后解码，避免内嵌 XML 污染并还原可读文本）
+        const title = this.decodeHtmlEntities(this.extractXmlValue(content, 'title'))
         return title || '[引用消息]'
       }
       default:
@@ -598,7 +598,9 @@ class ExportService {
    * 解析 appmsg（type 49）消息：转账、红包、礼物、音乐、链接、文件、小程序等
    */
   private parseType49(content: string): string {
-    const title = this.extractXmlValue(content, 'title')
+    // content 为未解码的原始 XML：title 可能内嵌正文粘贴的转义 XML，
+    // 在原始内容上提取可正确命中外层闭合标签，提取后再解码 title 还原可读文本
+    const title = this.decodeHtmlEntities(this.extractXmlValue(content, 'title'))
     const type = this.extractXmlValue(content, 'type')
 
     // 群公告消息（type 87）

@@ -1,5 +1,6 @@
 import { Notification } from 'electron'
 import type { MainProcessContext } from '../main/context'
+import { getNotificationIconPath } from '../main/windows/windowManager'
 
 /**
  * 桌宠纪念日/定时提醒服务（主进程）。
@@ -139,7 +140,8 @@ class PetReminderService {
     }
     if (!Notification.isSupported()) return
     try {
-      const notification = new Notification({ title, body: reminder.text, silent: false })
+      const iconPath = getNotificationIconPath()
+      const notification = new Notification({ title, body: reminder.text, silent: false, ...(iconPath ? { icon: iconPath } : {}) })
       notification.on('click', () => {
         const win = ctx.getMainWindow()
         if (win && !win.isDestroyed()) {

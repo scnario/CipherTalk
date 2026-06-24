@@ -170,6 +170,18 @@ function getDockIconPath(ctx: MainProcessContext): string {
     : join(process.resourcesPath, 'icon.png')
 }
 
+/**
+ * 系统通知用的图标路径（PNG，比 .ico 在 Windows toast 里渲染更稳）。
+ * 返回有效路径，找不到则 null（由调用方决定是否带 icon）。
+ */
+export function getNotificationIconPath(): string | null {
+  const isDev = !!process.env.VITE_DEV_SERVER_URL
+  const candidates = isDev
+    ? [join(__dirname, '../public/logo.png'), join(__dirname, '../public/icon-dock.png')]
+    : [join(process.resourcesPath, 'icon.png')]
+  return candidates.find(p => existsSync(p)) || null
+}
+
 function getTrayIconPath(ctx: MainProcessContext): string {
   if (process.platform === 'darwin') {
     const isDev = !!process.env.VITE_DEV_SERVER_URL

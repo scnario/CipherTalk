@@ -32,9 +32,12 @@ export function parseVoipMessage(content: string): string {
   return msg || '通话'
 }
 
-export function parseType49(content: string): string {
-  const title = extractXmlValue(content, 'title')
-  const type = extractXmlValue(content, 'type')
+export function parseType49(content: string, rawContent: string = content): string {
+  // title / type 可能被「正文里粘贴的 XML」污染（内层自带 <title>/<type>）。
+  // 必须在未解码的原始内容上提取：此时内层标签仍是 &lt;title&gt; 转义态，
+  // 非贪婪正则不会误命中内层闭合标签，提取后再对 title 单独解码。
+  const title = decodeHtmlEntities(extractXmlValue(rawContent, 'title'))
+  const type = extractXmlValue(rawContent, 'type')
 
   // 群公告消息（type 87）特殊处理
   if (type === '87') {
@@ -106,10 +109,13 @@ export function parseMessageContent(content: string, localType: number): string 
     content = content.toString('utf-8')
   }
 
+  // 保留未解码内容：appmsg 的 title/type 可能被正文内嵌的转义 XML 污染，
+  // 需在解码前提取（见 parseType49）。
+  const rawContent = content
   content = decodeHtmlEntities(content)
 
-  // 检查 XML type，用于识别引用消息等
-  const xmlType = extractXmlValue(content, 'type')
+  // 检查 XML type，用于识别引用消息等（从未解码内容提取，避免内嵌 XML 污染）
+  const xmlType = extractXmlValue(rawContent, 'type')
 
   switch (localType) {
     case 1:
@@ -132,14 +138,14 @@ export function parseMessageContent(content: string, localType: number): string 
       return poiname ? `[位置] ${poiname}` : label ? `[位置] ${label}` : '[位置]'
     }
     case 49:
-      return parseType49(content)
+      return parseType49(content, rawContent)
     case 50:
       return parseVoipMessage(content)
     case 10000:
       return cleanSystemMessage(content)
     case 244813135921:
-      // 引用消息，提取 title
-      const title = extractXmlValue(content, 'title')
+      // 引用消息，提取 title（从未解码内容提取后再解码，避免内嵌 XML 污染）
+      const title = decodeHtmlEntities(extractXmlValue(rawContent, 'title'))
       return title || '[引用消息]'
     default:
       // 对于未知的 localType，检查 XML type 来判断消息类型
@@ -155,11 +161,11 @@ export function parseMessageContent(content: string, localType: number): string 
         // 如果有 XML type，尝试按 type 49 的逻辑解析
         if (xmlType === '2000' || xmlType === '5' || xmlType === '6' || xmlType === '19' ||
             xmlType === '33' || xmlType === '36' || xmlType === '49' || xmlType === '57') {
-          return parseType49(content)
+          return parseType49(content, rawContent)
         }
         // type=57 的引用消息
         if (xmlType === '57') {
-          const title = extractXmlValue(content, 'title')
+          const title = decodeHtmlEntities(extractXmlValue(rawContent, 'title'))
           return title || '[引用消息]'
         }
       }

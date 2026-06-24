@@ -1,5 +1,6 @@
 import { Notification } from 'electron'
 import type { MainProcessContext } from '../main/context'
+import { getNotificationIconPath } from '../main/windows/windowManager'
 import { chatService } from './chatService'
 import type { ChatSession } from './chat/types'
 
@@ -178,10 +179,12 @@ class NotifyService {
   private showSystemNotification(payload: NotifyPayload): void {
     if (!Notification.isSupported()) return
     try {
+      const iconPath = getNotificationIconPath()
       const notification = new Notification({
         title: payload.displayName,
         body: payload.preview,
         silent: false,
+        ...(iconPath ? { icon: iconPath } : {}),
       })
       notification.on('click', () => {
         const win = this.ctx?.getMainWindow()

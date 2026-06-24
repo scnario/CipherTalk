@@ -58,6 +58,10 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
   const [cachePath, setCachePath] = useState('')
   const [wxid, setWxid] = useState('')
   const [wxidOptions, setWxidOptions] = useState<string[]>([])
+  // 内存提取到的账号字段：昵称 / 微信号 / 手机号（用于保存到账号档案）
+  const [accountName, setAccountName] = useState('')
+  const [accountNumber, setAccountNumber] = useState('')
+  const [accountPhone, setAccountPhone] = useState('')
   const [isAccountVerified, setIsAccountVerified] = useState(false)
   const [isVerifyingAccount, setIsVerifyingAccount] = useState(false)
   const [error, setError] = useState('')
@@ -74,7 +78,6 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
   const [isClosing, setIsClosing] = useState(false)
   const [showWechatPathPrompt, setShowWechatPathPrompt] = useState(false)
   const [customWechatPath, setCustomWechatPath] = useState('')
-  const [showHookSuccessToast, setShowHookSuccessToast] = useState(false)
   const [isDecrypting, setIsDecrypting] = useState(false)
   const [decryptStatus, setDecryptStatus] = useState('')
   const [countdown, setCountdown] = useState(0)
@@ -92,14 +95,6 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
   useEffect(() => {
     const removeStatus = window.electronAPI.wxKey?.onStatus?.((payload) => {
       setDbKeyStatus(payload.status)
-      // 检测到 Hook 安装成功的消息
-      if (payload.status.includes('hook安装成功') || payload.status.includes('Hook安装成功')) {
-        setShowHookSuccessToast(true)
-        // 3秒后自动隐藏
-        setTimeout(() => {
-          setShowHookSuccessToast(false)
-        }, 3000)
-      }
     })
     const removeImageProgress = window.electronAPI.imageKey?.onProgress?.((msg) => {
       setImageKeyStatus(msg)
@@ -390,6 +385,12 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
       const result = await window.electronAPI.wxKey.startGetKey(wechatPath, dbPath || undefined)
       if (result.success && result.key) {
         setDecryptKey(result.key)
+        // 留存内存提取到的账号字段，保存账号时写入档案
+        if (result.account) {
+          setAccountName(result.account.name || '')
+          setAccountNumber(result.account.number || '')
+          setAccountPhone(result.account.phone || '')
+        }
         setDbKeyStatus('密钥获取成功，正在验证账号目录...')
         setError('')
         setShowWechatPathPrompt(false)
@@ -406,8 +407,26 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
 
         if (result.validatedWxid) {
           setWxid(result.validatedWxid)
-          setDbKeyStatus(`密钥获取成功，已验证账号目录: ${result.validatedWxid}`)
+          const acc = result.account
+          const extra = acc && (acc.name || acc.number)
+            ? `（${[acc.name && `昵称: ${acc.name}`, acc.number && `微信号: ${acc.number}`].filter(Boolean).join('，')}）`
+            : ''
+          setDbKeyStatus(`密钥获取成功，已验证账号目录: ${result.validatedWxid}${extra}`)
           return
+        }
+
+        // DLL 直接返回了 wxid：用它定位并验证账号目录，避免落到“扫描文件夹让用户选”
+        if (result.account?.wxid) {
+          setWxid(result.account.wxid)
+          const ok = await verifyAccountDirectory(result.account.wxid, result.key, true)
+          if (ok) {
+            const a = result.account
+            const extra = (a.name || a.number)
+              ? `（${[a.name && `昵称: ${a.name}`, a.number && `微信号: ${a.number}`].filter(Boolean).join('，')}）`
+              : ''
+            setDbKeyStatus(`密钥获取成功，已验证账号目录: ${result.account.wxid}${extra}`)
+            return
+          }
         }
 
         // 先尝试当前登录账号检测（强信号）
@@ -574,7 +593,9 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
         cachePath,
         imageXorKey,
         imageAesKey,
-        displayName: wxid || '未命名账号'
+        wechatNumber: accountNumber,
+        phone: accountPhone,
+        displayName: accountName || wxid || '未命名账号'
       })
 
       if (!savedAccount) {
@@ -763,7 +784,7 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
             图片密钥用于解密微信图片，可自动获取，也可以稍后手动填写。
           </Typography.Paragraph>
           {renderInfoList([
-            '优先通过本地缓存目录和 kvcomm 码推导',
+            isMac ? '优先通过 kvcomm 码和模板文件推导' : '通过 Rust native 扫描微信进程内存',
             isMac ? 'kvcomm 失败时再回退到进程内存扫描' : '请先在电脑微信中打开几张图片',
             '此步骤可跳过'
           ])}
@@ -810,7 +831,7 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
         description: isMac ? '请选择微信版本目录或账号根目录。' : '请选择微信-设置-存储位置对应的目录。'
       })}
       <div className="flex flex-wrap items-center gap-2.5">
-        <Button className="min-w-[132px] justify-center" type="button" variant="primary" onPress={() => void handleAutoDetectPath()} isPending={isDetectingPath}>
+        <Button className="min-w-33 justify-center" type="button" variant="primary" onPress={() => void handleAutoDetectPath()} isPending={isDetectingPath}>
           <span className="grid size-4 shrink-0 place-items-center">
             {isDetectingPath ? <Spinner size="sm" color="current" /> : <Wand2 size={16} />}
           </span>
@@ -989,7 +1010,7 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
       {renderStatusAlert(
         isMac
           ? '获取密钥会调用 mac helper，并尝试识别候选账号目录。macOS 可能需要管理员授权。'
-          : '点击自动获取后等待 hook 安装成功提示，然后登录微信即可。',
+          : '点击自动获取后，程序会自动重启微信并扫描内存获取密钥，请耐心等待；如弹出微信登录请完成登录。',
         'default'
       )}
     </div>
@@ -1015,8 +1036,8 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
         {isFetchingImageKey ? '获取中' : '自动获取图片密钥'}
       </Button>
       {imageKeyStatus && renderStatusAlert(imageKeyStatus, 'default')}
-      {isFetchingImageKey && renderStatusAlert(isMac ? '正在尝试 kvcomm / 内存扫描，请稍候。' : '正在扫描内存，请稍候。', 'accent')}
-      <Description>{isMac ? '优先从 kvcomm 和模板文件推导，失败后回退到内存扫描。' : '如获取失败，请先在电脑微信中打开查看几张图片后重试。'}</Description>
+      {isFetchingImageKey && renderStatusAlert(isMac ? '正在尝试 kvcomm / 内存扫描，请稍候。' : '正在通过 Rust native 扫描微信内存，请稍候。', 'accent')}
+      <Description>{isMac ? '优先从 kvcomm 和模板文件推导，失败后回退到内存扫描。' : 'Windows 使用 Rust native 内存扫描；如获取失败，请先在电脑微信中打开查看几张图片后重试。'}</Description>
     </div>
   )
 
@@ -1163,14 +1184,6 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
 
   return (
     <div className={rootClassName}>
-      {/* Hook 安装成功气泡提示 */}
-      {showHookSuccessToast && (
-        <div className="hook-success-toast">
-          <CheckCircle2 size={18} />
-          <span>Hook 安装成功，现在登录微信</span>
-        </div>
-      )}
-
       {/* 全屏倒计时覆盖层 */}
       {countdown > 0 && (
         <div className="countdown-overlay">

@@ -1,27 +1,36 @@
 import { spawn, execSync } from 'child_process'
 import { join } from 'path'
 import { app } from 'electron'
-import { existsSync, copyFileSync, readdirSync, unlinkSync, statSync } from 'fs'
+import { existsSync, readdirSync, statSync } from 'fs'
+import * as crypto from 'crypto'
+
+/** 内存扫描诊断结果 */
+export interface WxScanDiag {
+  key: string | null
+  auth: boolean
+  dbOk: boolean
+  pids: number
+  opened: number
+  bytes: number
+  markers: number
+  candidates: number
+}
+
+/** 一次性从内存提取的完整账号信息（含 db_key 与明文字段） */
+export interface WxAccountInfo {
+  /** 64 位十六进制数据库密钥，未取到为 null */
+  dbKey: string | null
+  wxid: string
+  /** 昵称 */
+  name: string
+  /** 微信号 */
+  number: string
+  /** 绑定手机号 */
+  phone: string
+  seed: number
+}
 
 export class WxKeyService {
-  private lib: any = null
-  private pollingTimer: NodeJS.Timeout | null = null
-  private onKeyReceived: ((key: string) => void) | null = null
-  private onStatus: ((status: string, level: number) => void) | null = null
-
-  /**
-   * 获取 DLL 路径
-   */
-  getDllPath(): string {
-    // 开发环境: dist-electron/ -> resources/
-    // 打包环境: resources/resources/
-    const resourcesPath = app.isPackaged
-      ? join(process.resourcesPath, 'resources')
-      : join(app.getAppPath(), 'resources')
-
-    return join(resourcesPath, 'wx_key.dll')
-  }
-
   /**
    * 检查微信进程是否运行 (仅微信4.x Weixin.exe)
    */
@@ -181,206 +190,164 @@ export class WxKeyService {
     return false
   }
 
-  /**
-   * 初始化 DLL (使用 koffi)
-   */
-  async initialize(): Promise<boolean> {
+  // ===== Windows 内存扫描方案（Rust DLL wechat_key_tool.dll，Ed25519 强验证） =====
+
+  private scanLib: any = null
+
+  /** 内存扫描 DLL 路径 */
+  getScanDllPath(): string {
+    const resourcesPath = app.isPackaged
+      ? join(process.resourcesPath, 'resources')
+      : join(app.getAppPath(), 'resources')
+    return join(resourcesPath, 'wechat_key_tool.dll')
+  }
+
+  /** 加载内存扫描 DLL */
+  initScanLib(): boolean {
+    if (this.scanLib) return true
     try {
       const koffi = require('koffi')
-      const dllPath = this.getDllPath()
-
-      console.log('加载 DLL:', dllPath)
-
+      const dllPath = this.getScanDllPath()
       if (!existsSync(dllPath)) {
-        console.error('DLL 文件不存在:', dllPath)
+        console.error('内存扫描 DLL 不存在:', dllPath)
         return false
       }
-
-      this.lib = koffi.load(dllPath)
-
+      this.scanLib = koffi.load(dllPath)
       return true
     } catch (e) {
-      console.error('初始化 DLL 失败:', e)
+      console.error('加载内存扫描 DLL 失败:', e)
       return false
     }
   }
 
-  /**
-   * 安装 Hook
-   */
-  installHook(
-    targetPid: number,
-    onKeyReceived: (key: string) => void,
-    onStatus?: (status: string, level: number) => void
-  ): boolean {
-    if (!this.lib) {
-      return false
-    }
+  /** 还原内嵌私钥（XOR 混淆，配对 DLL 内嵌公钥） */
+  private getScanPrivateKey(): crypto.KeyObject {
+    const obf = '6a74585b5a6a5f5c59713f2a5e785e7a168e0e9425838c437f0b1274d114f59457f436c936b80178da1848856b58eef3'
+    const der = Buffer.from(Buffer.from(obf, 'hex').map(v => v ^ 0x5a))
+    return crypto.createPrivateKey({ key: der, format: 'der', type: 'pkcs8' })
+  }
 
+  /**
+   * 内存扫描获取数据库密钥（诊断版，Ed25519 挑战-应答鉴权）。
+   * 取挑战 → 私钥签名 → 验签通过后 DLL 扫描 crypt_key 邻域，返回密钥与读取诊断，
+   * 供调用方区分“权限不足读到 0 字节” vs “读到了但没找到密钥”。
+   * @param contactDbPath contact.db 完整路径（决定校验用的 salt）
+   */
+  scanDbKeyDiag(contactDbPath: string): WxScanDiag | null {
+    if (!this.initScanLib()) return null
     try {
       const koffi = require('koffi')
+      const wktChallenge = this.scanLib.func('int wkt_challenge(uint8_t*, size_t)')
+      const wktDiag = this.scanLib.func('void* wkt_scan_diag_auth(uint8_t*, size_t, str)')
+      const wktFree = this.scanLib.func('void wkt_free(void*)')
 
-      this.onKeyReceived = onKeyReceived
-      this.onStatus = onStatus || null
+      const nonce = Buffer.alloc(32)
+      if (wktChallenge(nonce, 32) !== 32) return null
 
-      // 定义函数
-      const InitializeHook = this.lib.func('bool InitializeHook(uint32_t)')
-      const success = InitializeHook(targetPid)
+      const sig = crypto.sign(null, nonce, this.getScanPrivateKey()) // Ed25519，64 字节
+      const ptr = wktDiag(sig, sig.length, contactDbPath)
+      if (!ptr) return null
 
-      if (success) {
-        this.startPolling()
+      const jsonStr = koffi.decode(ptr, 'char', -1)
+      wktFree(ptr)
+
+      const d = JSON.parse(String(jsonStr || '{}').replace(/\0/g, ''))
+      const rawKey = typeof d.key === 'string' ? d.key.trim() : ''
+      return {
+        key: rawKey.length === 64 ? rawKey : null,
+        auth: d.auth !== false,
+        dbOk: d.db_ok !== false,
+        pids: Number(d.pids) || 0,
+        opened: Number(d.opened) || 0,
+        bytes: Number(d.bytes) || 0,
+        markers: Number(d.markers) || 0,
+        candidates: Number(d.candidates) || 0,
       }
-
-      return success
     } catch (e) {
-      console.error('安装 Hook 失败:', e)
-      return false
+      console.error('内存扫描获取密钥失败:', e)
+      return null
     }
   }
 
-  /**
-   * 开始轮询
-   */
-  private startPolling(): void {
-    this.stopPolling()
-
-    this.pollingTimer = setInterval(() => {
-      this.pollData()
-    }, 100)
+  /** 仅取密钥（诊断版的薄封装）。 */
+  scanDbKey(contactDbPath: string): string | null {
+    return this.scanDbKeyDiag(contactDbPath)?.key ?? null
   }
 
   /**
-   * 停止轮询
+   * 一次性提取完整账号信息（Ed25519 鉴权）。
+   * 走 weixin.dll keystream 推导 + global_config 结构游走，直接读出
+   * db_key 与 wxid / name(昵称) / number(微信号) / phone(手机号)。
+   * 该路径不依赖 contact.db，命中即返回；失败/未授权返回 null。
    */
-  private stopPolling(): void {
-    if (this.pollingTimer) {
-      clearInterval(this.pollingTimer)
-      this.pollingTimer = null
-    }
-  }
-
-  /**
-   * 轮询数据
-   */
-  private pollData(): void {
-    if (!this.lib) return
-
+  scanAccount(): WxAccountInfo | null {
+    if (!this.initScanLib()) return null
     try {
       const koffi = require('koffi')
+      const wktChallenge = this.scanLib.func('int wkt_challenge(uint8_t*, size_t)')
+      const wktScanAccount = this.scanLib.func('void* wkt_scan_account_auth(uint8_t*, size_t)')
+      const wktFree = this.scanLib.func('void wkt_free(void*)')
 
-      // 定义函数
-      const PollKeyData = this.lib.func('bool PollKeyData(char*, int32_t)')
-      const GetStatusMessage = this.lib.func('bool GetStatusMessage(char*, int32_t, int32_t*)')
+      const nonce = Buffer.alloc(32)
+      if (wktChallenge(nonce, 32) !== 32) return null
 
-      // 轮询密钥
-      const keyBuffer = Buffer.alloc(65)
-      if (PollKeyData(keyBuffer, 65)) {
-        const key = keyBuffer.toString('utf8').replace(/\0/g, '').trim()
+      const sig = crypto.sign(null, nonce, this.getScanPrivateKey()) // Ed25519，64 字节
+      const ptr = wktScanAccount(sig, sig.length)
+      if (!ptr) return null
 
-        if (key && this.onKeyReceived) {
-          this.onKeyReceived(key)
-        }
-      }
+      const jsonStr = koffi.decode(ptr, 'char', -1)
+      wktFree(ptr)
 
-      // 轮询状态消息
-      for (let i = 0; i < 5; i++) {
-        const statusBuffer = Buffer.alloc(256)
-        const levelBuffer = Buffer.alloc(4)
-
-        if (GetStatusMessage(statusBuffer, 256, levelBuffer)) {
-          const status = statusBuffer.toString('utf8').replace(/\0/g, '').trim()
-          const level = levelBuffer.readInt32LE(0)
-
-          if (this.onStatus) {
-            this.onStatus(status, level)
-          }
-        } else {
-          break
-        }
+      const d = JSON.parse(String(jsonStr || '{}').replace(/\0/g, ''))
+      const dbKey = typeof d.db_key === 'string' ? d.db_key.trim() : ''
+      return {
+        dbKey: dbKey.length === 64 ? dbKey : null,
+        wxid: String(d.wxid || '').trim(),
+        name: String(d.name || '').trim(),
+        number: String(d.number || '').trim(),
+        phone: String(d.phone || '').trim(),
+        seed: Number(d.seed) || 0,
       }
     } catch (e) {
-      console.error('轮询数据失败:', e)
+      console.error('账号信息扫描失败:', e)
+      return null
     }
   }
 
   /**
-   * 卸载 Hook
+   * 内存扫描图片 AES 密钥（Ed25519 鉴权）。传入模板密文(16B)，
+   * 返回 32 字符密钥串（调用方取前 16 字符作 AES-128 密钥），失败返回 null。
    */
-  uninstallHook(): boolean {
-    this.stopPolling()
-
-    if (!this.lib) {
-      return false
-    }
-
+  scanImageAesKey(ciphertext: Buffer): string | null {
+    if (!ciphertext || ciphertext.length < 16) return null
+    if (!this.initScanLib()) return null
     try {
-      const CleanupHook = this.lib.func('bool CleanupHook()')
-      return CleanupHook()
-    } catch {
-      return false
+      const koffi = require('koffi')
+      const wktChallenge = this.scanLib.func('int wkt_challenge(uint8_t*, size_t)')
+      const wktScanImg = this.scanLib.func('void* wkt_scan_image_key_auth(uint8_t*, size_t, uint8_t*, size_t)')
+      const wktFree = this.scanLib.func('void wkt_free(void*)')
+
+      const nonce = Buffer.alloc(32)
+      if (wktChallenge(nonce, 32) !== 32) return null
+
+      const sig = crypto.sign(null, nonce, this.getScanPrivateKey())
+      const ptr = wktScanImg(sig, sig.length, ciphertext, ciphertext.length)
+      if (!ptr) return null
+
+      const key = koffi.decode(ptr, 'char', -1)
+      wktFree(ptr)
+
+      const trimmed = String(key || '').replace(/\0/g, '').trim()
+      return trimmed.length >= 16 ? trimmed : null
+    } catch (e) {
+      console.error('内存扫描图片密钥失败:', e)
+      return null
     }
   }
 
-  /**
-   * 获取最后错误信息
-   */
-  getLastError(): string {
-    if (!this.lib) {
-      return '未知错误'
-    }
-
-    try {
-      const GetLastErrorMsg = this.lib.func('const char* GetLastErrorMsg()')
-      return GetLastErrorMsg() || '无错误'
-    } catch {
-      return '获取错误信息失败'
-    }
-  }
-
-  /**
-   * 释放资源
-   */
+  /** 释放 Rust 扫描库引用。 */
   dispose(): void {
-    this.uninstallHook()
-    this.lib = null
-    this.onKeyReceived = null
-    this.onStatus = null
-  }
-
-  /**
-   * 获取图片解密密钥（通过 DLL 本地文件扫描，秒级返回，无需微信进程运行）
-   * 从 kvcomm 缓存目录的 statistic 文件中提取唯一码，计算 XOR 和 AES 密钥
-   */
-  getImageKey(): { success: boolean; json?: string; error?: string } {
-    if (!this.lib) {
-      return { success: false, error: 'DLL 未加载' }
-    }
-
-    try {
-      const koffi = require('koffi')
-      const GetImageKeyFn = this.lib.func('bool GetImageKey(_Out_ char *resultBuffer, int bufferSize)')
-      const GetLastErrorMsgFn = this.lib.func('const char* GetLastErrorMsg()')
-
-      const resultBuffer = Buffer.alloc(8192)
-      const ok = GetImageKeyFn(resultBuffer, resultBuffer.length)
-
-      if (!ok) {
-        let errMsg = '获取图片密钥失败'
-        try {
-          const errPtr = GetLastErrorMsgFn()
-          if (errPtr) {
-            errMsg = typeof errPtr === 'string' ? errPtr : koffi.decode(errPtr, 'char', -1)
-          }
-        } catch { }
-        return { success: false, error: errMsg }
-      }
-
-      const nullIdx = resultBuffer.indexOf(0)
-      const json = resultBuffer.toString('utf8', 0, nullIdx > -1 ? nullIdx : undefined).trim()
-      return { success: true, json }
-    } catch (e) {
-      return { success: false, error: String(e) }
-    }
+    this.scanLib = null
   }
 
   /**
