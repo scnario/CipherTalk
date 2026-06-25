@@ -26,7 +26,7 @@ export interface SettingsConfig {
   sttLanguages: string[]
   sttModelType: 'int8' | 'float32'
   sttMode: 'cpu' | 'gpu' | 'online'
-  sttOnlineProvider: 'openai-compatible' | 'aliyun-qwen-asr' | 'custom'
+  sttOnlineProvider: 'openai-compatible' | 'aliyun-qwen-asr' | 'volcano-doubao' | 'custom'
   sttOnlineApiKey: string
   sttOnlineBaseURL: string
   sttOnlineModel: string

@@ -1220,7 +1220,7 @@ export interface ElectronAPI {
       error?: string
     }>
     testOnlineConfig: (overrides?: {
-      provider?: 'openai-compatible' | 'aliyun-qwen-asr' | 'custom'
+      provider?: 'openai-compatible' | 'aliyun-qwen-asr' | 'qianwen-cloud' | 'volcano-doubao' | 'custom'
       apiKey?: string
       baseURL?: string
       model?: string

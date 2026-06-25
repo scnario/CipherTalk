@@ -29,7 +29,8 @@ const sttOnlineLanguageOptions = [
 
 const sttOnlineProviderOptions = [
   { value: 'openai-compatible', label: 'OpenAI 兼容' },
-  { value: 'aliyun-qwen-asr', label: '阿里云 Qwen-ASR' },
+  { value: 'aliyun-qwen-asr', label: '阿里云 / 千问云（Qwen-ASR）' },
+  { value: 'volcano-doubao', label: '火山豆包（极速版）' },
   { value: 'custom', label: '自定义接口' }
 ] as const
 
@@ -52,6 +53,10 @@ const STT_ONLINE_DEFAULTS = {
   'aliyun-qwen-asr': {
     baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     model: 'qwen3-asr-flash'
+  },
+  'volcano-doubao': {
+    baseURL: 'https://openspeech.bytedance.com/api/v3/auc/bigmodel/recognize/flash',
+    model: 'volc.bigasr.auc_turbo'
   },
   custom: {
     baseURL: '',
@@ -169,20 +174,18 @@ function SttTab({ active, showMessage }: SttTabProps) {
   const handleSttOnlineProviderChange = (provider: SttOnlineProvider) => {
     setSttOnlineProvider(provider)
 
-    if (provider === 'aliyun-qwen-asr') {
-      if (!sttOnlineBaseURL || sttOnlineBaseURL === STT_ONLINE_DEFAULTS['openai-compatible'].baseURL) {
-        setSttOnlineBaseURL(STT_ONLINE_DEFAULTS['aliyun-qwen-asr'].baseURL)
-      }
-      if (!sttOnlineModel || sttOnlineModel === STT_ONLINE_DEFAULTS['openai-compatible'].model) {
-        setSttOnlineModel(STT_ONLINE_DEFAULTS['aliyun-qwen-asr'].model)
-      }
-    } else if (provider === 'openai-compatible') {
-      if (!sttOnlineBaseURL || sttOnlineBaseURL === STT_ONLINE_DEFAULTS['aliyun-qwen-asr'].baseURL) {
-        setSttOnlineBaseURL(STT_ONLINE_DEFAULTS['openai-compatible'].baseURL)
-      }
-      if (!sttOnlineModel || sttOnlineModel === STT_ONLINE_DEFAULTS['aliyun-qwen-asr'].model) {
-        setSttOnlineModel(STT_ONLINE_DEFAULTS['openai-compatible'].model)
-      }
+    if (provider === 'custom') return
+
+    // 只在当前值为空、或仍是某个预设的默认值时才覆盖，避免冲掉用户自定义的配置
+    const target = STT_ONLINE_DEFAULTS[provider]
+    const presetBaseURLs: string[] = Object.values(STT_ONLINE_DEFAULTS).map(d => d.baseURL).filter(Boolean)
+    const presetModels: string[] = Object.values(STT_ONLINE_DEFAULTS).map(d => d.model).filter(Boolean)
+
+    if (!sttOnlineBaseURL || presetBaseURLs.includes(sttOnlineBaseURL)) {
+      setSttOnlineBaseURL(target.baseURL)
+    }
+    if (!sttOnlineModel || presetModels.includes(sttOnlineModel)) {
+      setSttOnlineModel(target.model)
     }
   }
 
@@ -878,8 +881,10 @@ function SttTab({ active, showMessage }: SttTabProps) {
               {sttOnlineProvider === 'openai-compatible'
                 ? '选择 OpenAI 兼容时会自动补全标准路径'
                 : sttOnlineProvider === 'aliyun-qwen-asr'
-                  ? '阿里云走 DashScope 兼容入口'
-                  : '自定义接口会直接使用你填写的完整 URL'}
+                  ? '阿里云、千问云都走 DashScope 兼容入口；换模型直接改下方模型名'
+                  : sttOnlineProvider === 'volcano-doubao'
+                    ? '火山引擎·豆包录音文件极速版，新版控制台只需填一个 API Key'
+                    : '自定义接口会直接使用你填写的完整 URL'}
             </Description>
           </Select>
 
@@ -892,7 +897,9 @@ function SttTab({ active, showMessage }: SttTabProps) {
                     ? 'https://api.openai.com/v1/audio/transcriptions'
                     : sttOnlineProvider === 'aliyun-qwen-asr'
                       ? 'https://dashscope.aliyuncs.com/compatible-mode/v1'
-                      : 'https://your-api.example.com/full/path'
+                      : sttOnlineProvider === 'volcano-doubao'
+                        ? 'https://openspeech.bytedance.com/api/v3/auc/bigmodel/recognize/flash'
+                        : 'https://your-api.example.com/full/path'
                 }
               />
             </InputGroup>
@@ -901,7 +908,9 @@ function SttTab({ active, showMessage }: SttTabProps) {
                 ? '支持填写完整接口 URL，也兼容只填 /v1 基地址'
                 : sttOnlineProvider === 'aliyun-qwen-asr'
                   ? '建议填写 DashScope 兼容入口'
-                  : '系统会按你填写的地址原样发起请求'}
+                  : sttOnlineProvider === 'volcano-doubao'
+                    ? '默认即火山极速版 flash 端点，一般无需修改'
+                    : '系统会按你填写的地址原样发起请求'}
             </Description>
           </TextField>
 
@@ -917,12 +926,14 @@ function SttTab({ active, showMessage }: SttTabProps) {
             <TextField fullWidth value={sttOnlineModel} onChange={setSttOnlineModel}>
               <Label>模型名称</Label>
               <InputGroup fullWidth variant="secondary">
-                <InputGroup.Input placeholder={sttOnlineProvider === 'aliyun-qwen-asr' ? 'qwen3-asr-flash' : 'gpt-4o-mini-transcribe'} />
+                <InputGroup.Input placeholder={sttOnlineProvider === 'aliyun-qwen-asr' ? 'qwen3-asr-flash' : sttOnlineProvider === 'volcano-doubao' ? 'volc.bigasr.auc_turbo' : 'gpt-4o-mini-transcribe'} />
               </InputGroup>
               <Description>
                 {sttOnlineProvider === 'aliyun-qwen-asr'
-                  ? '默认使用 qwen3-asr-flash'
-                  : '可替换为兼容模型名'}
+                  ? '默认 qwen3-asr-flash，可改成 qwen-omni 等其他 qwen 系列语音模型'
+                  : sttOnlineProvider === 'volcano-doubao'
+                    ? '火山此处填 Resource-Id，默认 volc.bigasr.auc_turbo（极速版）'
+                    : '可替换为兼容模型名'}
               </Description>
             </TextField>
           </div>

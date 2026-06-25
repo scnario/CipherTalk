@@ -209,7 +209,7 @@ function SettingsLayout() {
   const [sttLanguages, setSttLanguagesState] = useState<string[]>([])
   const [sttModelType, setSttModelType] = useState<'int8' | 'float32'>('int8')
   const [sttMode, setSttMode] = useState<'cpu' | 'gpu' | 'online'>('cpu')
-  const [sttOnlineProvider, setSttOnlineProvider] = useState<'openai-compatible' | 'aliyun-qwen-asr' | 'custom'>('openai-compatible')
+  const [sttOnlineProvider, setSttOnlineProvider] = useState<'openai-compatible' | 'aliyun-qwen-asr' | 'volcano-doubao' | 'custom'>('openai-compatible')
   const [sttOnlineApiKey, setSttOnlineApiKey] = useState('')
   const [sttOnlineBaseURL, setSttOnlineBaseURL] = useState('https://api.openai.com/v1')
   const [sttOnlineModel, setSttOnlineModel] = useState('gpt-4o-mini-transcribe')
