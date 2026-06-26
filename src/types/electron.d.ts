@@ -1212,13 +1212,6 @@ export interface ElectronAPI {
       errorCode?: 'BAD_REQUEST' | 'STT_NOT_READY' | 'INTERNAL_ERROR'
       error?: string
     }>
-    transcribeAudioFile: (filePath: string) => Promise<{
-      success: boolean
-      transcript?: string
-      sttMode?: 'cpu' | 'gpu' | 'online'
-      errorCode?: 'BAD_REQUEST' | 'STT_NOT_READY' | 'INTERNAL_ERROR'
-      error?: string
-    }>
     testOnlineConfig: (overrides?: {
       provider?: 'openai-compatible' | 'aliyun-qwen-asr' | 'qianwen-cloud' | 'volcano-doubao' | 'custom'
       apiKey?: string

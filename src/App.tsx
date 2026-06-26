@@ -17,7 +17,6 @@ import McpPage from './pages/McpPage'
 import AgentPage from './pages/agent/AgentPage'
 import DiaryPage from './pages/DiaryPage'
 import ExportPage from './pages/export/ExportPage'
-import TranscriptionAssistantPage from './pages/TranscriptionAssistantPage'
 import ActivationPage from './pages/ActivationPage'
 import ImageWindow from './pages/ImageWindow'
 import VideoWindow from './pages/VideoWindow'
@@ -845,7 +844,6 @@ function App() {
               <Route path="/pets" element={<PetsPage />} />
               <Route path="/export" element={<ExportPage />} />
               <Route path="/device-connect" element={<Navigate to="/home" replace />} />
-              <Route path="/transcription-assistant" element={<TranscriptionAssistantPage />} />
               <Route path="/chat-history/:sessionId/:messageId" element={<ChatHistoryPage />} />
             </Routes>
           </RouteGuard>
