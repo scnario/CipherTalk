@@ -9,6 +9,7 @@ import {
   type HTMLAttributes,
   useContext,
   useEffect,
+  useRef,
   useState,
 } from "react";
 import { type BundledLanguage, codeToHtml, type ShikiTransformer } from "shiki";
@@ -17,7 +18,12 @@ type CodeBlockProps = HTMLAttributes<HTMLDivElement> & {
   code: string;
   language: BundledLanguage;
   showLineNumbers?: boolean;
+  /** 正文还在流式输出：高亮节流到 HIGHLIGHT_STREAMING_THROTTLE_MS 一次，而不是每个 token 都全量重跑 Shiki。 */
+  isStreaming?: boolean;
 };
+
+// 流式期间 Shiki 全量高亮的最小间隔：每个 ~50ms 的 token 都重新高亮会让主线程卡死，代码甚至显示不出来。
+const HIGHLIGHT_STREAMING_THROTTLE_MS = 400;
 
 type CodeBlockContextType = {
   code: string;
@@ -75,26 +81,51 @@ export const CodeBlock = ({
   code,
   language,
   showLineNumbers = false,
+  isStreaming = false,
   className,
   children,
   ...props
 }: CodeBlockProps) => {
   const [html, setHtml] = useState<string>("");
   const [darkHtml, setDarkHtml] = useState<string>("");
+  const lastRunAtRef = useRef(0);
+  const pendingTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     let active = true;
-    highlightCode(code, language, showLineNumbers).then(([light, dark]) => {
-      if (active) {
-        setHtml(light);
-        setDarkHtml(dark);
-      }
-    });
+
+    const run = () => {
+      lastRunAtRef.current = Date.now();
+      highlightCode(code, language, showLineNumbers).then(([light, dark]) => {
+        if (active) {
+          setHtml(light);
+          setDarkHtml(dark);
+        }
+      });
+    };
+
+    if (pendingTimerRef.current !== null) {
+      window.clearTimeout(pendingTimerRef.current);
+      pendingTimerRef.current = null;
+    }
+
+    if (isStreaming) {
+      const elapsed = Date.now() - lastRunAtRef.current;
+      const wait = Math.max(0, HIGHLIGHT_STREAMING_THROTTLE_MS - elapsed);
+      pendingTimerRef.current = window.setTimeout(run, wait);
+    } else {
+      // 非流式，或流式刚结束：立即跑一次，保证最终结果准确。
+      run();
+    }
 
     return () => {
       active = false;
+      if (pendingTimerRef.current !== null) {
+        window.clearTimeout(pendingTimerRef.current);
+        pendingTimerRef.current = null;
+      }
     };
-  }, [code, language, showLineNumbers]);
+  }, [code, language, showLineNumbers, isStreaming]);
 
   return (
     <CodeBlockContext.Provider value={{ code }}>

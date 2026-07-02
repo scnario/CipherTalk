@@ -26,16 +26,6 @@
   pointer-events: none;
 }
 
-.home-background-tint {
-  position: absolute;
-  inset: 0;
-  z-index: 0;
-  background: radial-gradient(circle at 18% 22%, color-mix(in srgb, var(--bg-primary) 12%, transparent), transparent 34%), linear-gradient(180deg, color-mix(in srgb, var(--bg-primary) 42%, transparent), color-mix(in srgb, var(--bg-primary) 66%, transparent));
-  pointer-events: none;
-}
-[data-mode=dark] .home-background-tint {
-  background: radial-gradient(circle at 18% 22%, rgba(255, 255, 255, 0.08), transparent 34%), linear-gradient(180deg, rgba(0, 0, 0, 0.34), rgba(0, 0, 0, 0.58));
-}
 
 .home-page > .random-message-card,
 .home-page > .home-header {
@@ -351,7 +341,12 @@
   max-width: 100%;
   font-size: 14px;
   font-weight: 600;
-  color: var(--text-primary);
+  color: #fff;
+  text-shadow:
+    0 1px 0 rgba(0, 0, 0, 0.85),
+    0 -1px 0 rgba(0, 0, 0, 0.6),
+    1px 0 0 rgba(0, 0, 0, 0.6),
+    -1px 0 0 rgba(0, 0, 0, 0.6);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -381,6 +376,20 @@
 }
 .random-message-card .random-message-body::before, .random-message-card .random-message-body::after {
   content: none;
+}
+/* 液态玻璃气泡：无底色，只保留 SVG 折射 + 细描边（位移贴图在组件内联注入） */
+.random-message-card .random-message-body--glass {
+  position: relative;
+  background: transparent;
+  border-color: rgba(255, 255, 255, 0.22);
+  isolation: isolate;
+  /* 玻璃上文字用白字 + 细黑描边，保证在任何背景折射下都清晰 */
+  color: #fff;
+  text-shadow:
+    0 1px 0 rgba(0, 0, 0, 0.85),
+    0 -1px 0 rgba(0, 0, 0, 0.6),
+    1px 0 0 rgba(0, 0, 0, 0.6),
+    -1px 0 0 rgba(0, 0, 0, 0.6);
 }
 .random-message-card .random-message-body-inner {
   display: -webkit-box;
@@ -555,3 +564,40 @@
     background-position: -200% 0;
   }
 }
+
+/* —— 炫技液态玻璃圆球：浮在首页背景上，可拖动、抛掷、弹跳衰减 —— */
+
+/* 宿主层：铺满 home-page，承载圆球的绝对定位；自己不参与布局，只提供坐标系 */
+.liquid-glass-ball-host {
+  position: absolute;
+  inset: 0;
+  z-index: 200;          /* 最高层：球浮在卡片/按钮之上，可拖到任意位置 */
+  pointer-events: none;  /* 宿主放行点击，只有球本身接收指针，不挡下层交互 */
+}
+
+.liquid-glass-ball {
+  position: absolute;
+  top: 0;
+  left: 0;
+  border-radius: 50%;
+  cursor: grab;
+  touch-action: none;    /* 拖动时禁止浏览器手势（滚动/缩放）抢占 */
+  user-select: none;
+  -webkit-user-select: none;
+  will-change: left, top;
+  pointer-events: auto;  /* 覆盖宿主的 none，让球可被点击/拖动 */
+  /* 液态玻璃：SVG 折射（backdrop-filter 挂在这里）+ 一圈细描边，无高光/阴影 */
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  overflow: hidden;   /* clip 折射到圆形区域 */
+}
+.liquid-glass-ball:active {
+  cursor: grabbing;
+}
+
+/* 尊重用户的减少动效偏好：球静止停在初始位置，不跑物理循环 */
+@media (prefers-reduced-motion: reduce) {
+  .liquid-glass-ball {
+    cursor: default;
+  }
+}
+

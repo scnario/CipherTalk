@@ -802,6 +802,7 @@ const MessageCode = ({ children, className, node: _node, ...props }: MessageCode
         <CodeBlock
           className="w-fit max-w-full max-h-[70vh] rounded-none border-0 bg-transparent [&>div>div]:bg-transparent! [&>div>div>pre]:bg-transparent! [&>div>div>pre]:pb-8 [&>div>div>pre]:pr-14"
           code={code}
+          isStreaming={isStreaming}
           language={language}
         />
       )}
