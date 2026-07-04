@@ -4,11 +4,11 @@
  * 等待回复时头部只显示「对方正在输入…」，不暴露内部检索过程。
  * 历史挂 agent 会话存储（scope kind='persona'），打开恢复、每轮保存。
  */
-import { AlertCircle, Bot, CheckCircle, Clock3, History, Loader2, MessageSquareX, Mic2, PencilLine, RefreshCw, SquarePen, Trash2 } from 'lucide-react'
+import { ArrowsRotateLeft, CircleCheck, CircleDashed, CircleExclamation, Clock, ClockArrowRotateLeft, CommentSlash, FaceRobot, Microphone, PencilToLine, PencilToSquare, TrashBin } from '@gravity-ui/icons'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation } from 'react-router-dom'
 import { useChat } from '@ai-sdk/react'
-import { AlertDialog, Button, ProgressBar, Dropdown, Header, Label, Modal, Skeleton, Tooltip } from '@heroui/react'
+import { AlertDialog, Button, ProgressBar, Dropdown, Header, Label, Modal, ScrollShadow, Skeleton, Tooltip } from '@heroui/react'
 import type { FileUIPart, UIMessage } from 'ai'
 import {
   PromptInput,
@@ -210,7 +210,7 @@ function PersonaStickerBubble({ sticker }: { sticker: PersonaStickerData }) {
   if (!src) {
     return (
       <div className="flex size-20 items-center justify-center rounded-2xl rounded-tl-sm bg-surface">
-        <Loader2 className="animate-spin text-muted" size={16} />
+        <CircleDashed className="animate-spin text-muted" width={16} height={16} />
       </div>
     )
   }
@@ -219,7 +219,7 @@ function PersonaStickerBubble({ sticker }: { sticker: PersonaStickerData }) {
 
 /** 微信语音条的声波图标：加载时旋转提示，播放时切换成动态音量柱。 */
 function VoiceWaves({ loading, playing }: { loading: boolean; playing: boolean }) {
-  if (loading) return <Loader2 className="shrink-0 animate-spin text-muted" size={16} />
+  if (loading) return <CircleDashed className="shrink-0 animate-spin text-muted" width={16} height={16} />
   if (playing) return <VoicePlayingBars />
   return (
     <svg
@@ -985,7 +985,7 @@ export default function PersonaChatPage({ sessionId: sessionIdProp, embedded = f
           根据你们的聊天记录提炼 TA 的说话风格、口头禅和真实对话样本，生成一个能模仿 TA 语气聊天的数字分身。
         </p>
         <div className="flex items-start gap-2 rounded-lg bg-warning-soft p-3 text-sm text-warning-soft-foreground">
-          <AlertCircle size={16} className="mt-0.5 shrink-0" />
+          <CircleExclamation width={16} height={16} className="mt-0.5 shrink-0" />
           <span>
             克隆和聊天时，部分聊天记录会发送给你配置的 AI 模型服务商用于分析与生成。
             如使用 Ollama 等本地模型则数据不出本机。画像仅保存在本地，可随时删除。
@@ -993,12 +993,12 @@ export default function PersonaChatPage({ sessionId: sessionIdProp, embedded = f
         </div>
         {buildError && (
           <div className="flex items-start gap-2 rounded-lg bg-danger-soft p-3 text-sm text-danger-soft-foreground">
-            <AlertCircle size={16} className="mt-0.5 shrink-0" />
+            <CircleExclamation width={16} height={16} className="mt-0.5 shrink-0" />
             <span>{buildError}</span>
           </div>
         )}
         <Button onPress={handleBuild}>
-          <Bot className="size-4" />
+          <FaceRobot className="size-4" />
           开始克隆
         </Button>
       </div>
@@ -1021,7 +1021,7 @@ export default function PersonaChatPage({ sessionId: sessionIdProp, embedded = f
           <ProgressBar.Track><ProgressBar.Fill /></ProgressBar.Track>
         </ProgressBar>
         <div className="flex items-center gap-2 text-xs text-muted">
-          <Loader2 size={14} className="shrink-0 animate-spin" />
+          <CircleDashed width={14} height={14} className="shrink-0 animate-spin" />
           <span className="text-center">
             {buildProgress?.detail || '分析聊天记录并调用 AI 提炼画像与真实问答，通常需要几分钟'}
           </span>
@@ -1044,7 +1044,7 @@ export default function PersonaChatPage({ sessionId: sessionIdProp, embedded = f
         <div className="flex shrink-0 items-center gap-1">
           <Dropdown isOpen={historyOpen} onOpenChange={handleHistoryOpenChange}>
             <Button isIconOnly size="sm" variant="ghost" aria-label="历史对话记录">
-              <History size={16} />
+              <ClockArrowRotateLeft width={16} height={16} />
             </Button>
             <Dropdown.Popover className="w-[min(22rem,calc(100vw-2rem))]" placement="bottom end">
               <Dropdown.Menu
@@ -1060,7 +1060,7 @@ export default function PersonaChatPage({ sessionId: sessionIdProp, embedded = f
                 }}
               >
                 <Dropdown.Item id="__new__" key="__new__" textValue="开启新对话">
-                  <SquarePen className="size-4 shrink-0 text-muted" />
+                  <PencilToSquare className="size-4 shrink-0 text-muted" />
                   <Label>开启新对话</Label>
                 </Dropdown.Item>
                 {historyRecords.length > 0 ? (
@@ -1069,7 +1069,7 @@ export default function PersonaChatPage({ sessionId: sessionIdProp, embedded = f
                     {historyRecords.map((record) => (
                       <Dropdown.Item className="min-h-14 gap-3 py-2.5" id={String(record.id)} key={record.id} textValue={record.title}>
                         <Dropdown.ItemIndicator />
-                        <Clock3 className="size-4 shrink-0 text-muted" />
+                        <Clock className="size-4 shrink-0 text-muted" />
                         <span className="min-w-0 flex-1">
                           <Label className="block truncate text-sm font-medium">{record.title}</Label>
                           <span className="block truncate text-xs text-muted">
@@ -1091,7 +1091,7 @@ export default function PersonaChatPage({ sessionId: sessionIdProp, embedded = f
                             variant="ghost"
                             onPress={() => { setRecordPendingDelete(record); setHistoryOpen(false) }}
                           >
-                            <Trash2 className="size-4" />
+                            <TrashBin className="size-4" />
                           </Button>
                         </span>
                       </Dropdown.Item>
@@ -1116,7 +1116,7 @@ export default function PersonaChatPage({ sessionId: sessionIdProp, embedded = f
                 isPending={voiceCloning}
                 onPress={handleCloneVoice}
               >
-                <Mic2 size={16} />
+                <Microphone width={16} height={16} />
               </Button>
             </Tooltip.Trigger>
             <Tooltip.Content placement="bottom">{persona?.ttsVoice ? '重新克隆声音' : '克隆声音'}</Tooltip.Content>
@@ -1131,7 +1131,7 @@ export default function PersonaChatPage({ sessionId: sessionIdProp, embedded = f
                 isDisabled={busy || !persona}
                 onPress={openSpeakingStyleEditor}
               >
-                <PencilLine size={16} />
+                <PencilToLine width={16} height={16} />
               </Button>
             </Tooltip.Trigger>
             <Tooltip.Content placement="bottom">修改说话方式</Tooltip.Content>
@@ -1139,7 +1139,7 @@ export default function PersonaChatPage({ sessionId: sessionIdProp, embedded = f
           <Tooltip delay={0}>
             <Tooltip.Trigger>
               <Button isIconOnly size="sm" variant="ghost" aria-label="重建画像" isDisabled={busy} onPress={() => setPhase('confirm')}>
-                <RefreshCw size={16} />
+                <ArrowsRotateLeft width={16} height={16} />
               </Button>
             </Tooltip.Trigger>
             <Tooltip.Content placement="bottom">重建画像（聊天记录更新后可重新克隆）</Tooltip.Content>
@@ -1155,7 +1155,7 @@ export default function PersonaChatPage({ sessionId: sessionIdProp, embedded = f
                 isPending={clearingConversations}
                 onPress={() => setConfirmAction('clearConversations')}
               >
-                <MessageSquareX size={16} />
+                <CommentSlash width={16} height={16} />
               </Button>
             </Tooltip.Trigger>
             <Tooltip.Content placement="bottom">删除该分身的所有对话记录</Tooltip.Content>
@@ -1163,7 +1163,7 @@ export default function PersonaChatPage({ sessionId: sessionIdProp, embedded = f
           <Tooltip delay={0}>
             <Tooltip.Trigger>
               <Button isIconOnly size="sm" variant="ghost" aria-label="删除分身" onPress={() => setConfirmAction('deletePersona')}>
-                <Trash2 size={16} />
+                <TrashBin width={16} height={16} />
               </Button>
             </Tooltip.Trigger>
             <Tooltip.Content placement="bottom">删除分身画像</Tooltip.Content>
@@ -1177,7 +1177,7 @@ export default function PersonaChatPage({ sessionId: sessionIdProp, embedded = f
             ? 'bg-success-soft text-success-soft-foreground'
             : 'bg-danger-soft text-danger-soft-foreground'
         }`}>
-          {voiceCloneStatus.ok ? <CheckCircle size={14} className="mt-0.5 shrink-0" /> : <AlertCircle size={14} className="mt-0.5 shrink-0" />}
+          {voiceCloneStatus.ok ? <CircleCheck width={14} height={14} className="mt-0.5 shrink-0" /> : <CircleExclamation width={14} height={14} className="mt-0.5 shrink-0" />}
           <span>{voiceCloneStatus.text}</span>
         </div>
       )}
@@ -1191,7 +1191,7 @@ export default function PersonaChatPage({ sessionId: sessionIdProp, embedded = f
             <Modal.CloseTrigger />
             <Modal.Header>
               <Modal.Icon className="bg-accent-soft text-accent-soft-foreground">
-                <PencilLine size={20} />
+                <PencilToLine width={20} height={20} />
               </Modal.Icon>
               <Modal.Heading>修改说话方式</Modal.Heading>
             </Modal.Header>
@@ -1277,7 +1277,7 @@ export default function PersonaChatPage({ sessionId: sessionIdProp, embedded = f
                 </section>
                 {speakingStyleError && (
                   <div className="flex items-start gap-2 rounded-lg bg-danger-soft p-3 text-sm text-danger-soft-foreground">
-                    <AlertCircle size={16} className="mt-0.5 shrink-0" />
+                    <CircleExclamation width={16} height={16} className="mt-0.5 shrink-0" />
                     <span>{speakingStyleError}</span>
                   </div>
                 )}
@@ -1292,7 +1292,7 @@ export default function PersonaChatPage({ sessionId: sessionIdProp, embedded = f
       </Modal.Backdrop>
 
       {/* 消息区 */}
-      <div
+      <ScrollShadow
         ref={scrollRef}
         className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-6 pt-5 pb-52"
         onLoadCapture={handleMessageMediaLoad}
@@ -1300,7 +1300,7 @@ export default function PersonaChatPage({ sessionId: sessionIdProp, embedded = f
       >
         {messages.length === 0 && pendingTexts.length === 0 && !busy && (
           <div className="flex flex-1 flex-col items-center justify-center gap-3 text-muted">
-            <Bot size={40} />
+            <FaceRobot width={40} height={40} />
             <p className="text-base">和「{displayName}」的分身打个招呼吧</p>
           </div>
         )}
@@ -1399,28 +1399,19 @@ export default function PersonaChatPage({ sessionId: sessionIdProp, embedded = f
         )}
         {error && (
           <div className="flex items-start gap-2 rounded-lg bg-danger-soft p-3 text-sm text-danger-soft-foreground">
-            <AlertCircle size={16} className="mt-0.5 shrink-0" />
+            <CircleExclamation width={16} height={16} className="mt-0.5 shrink-0" />
             <span>{error.message || '生成失败，请重试'}</span>
           </div>
         )}
-      </div>
+      </ScrollShadow>
 
       {/* 输入栏 */}
       <div className="pointer-events-none absolute right-0 bottom-0 left-0 h-56">
-        <div
-          aria-hidden="true"
-          className="absolute inset-0 backdrop-blur-[2px]"
-          style={{
-            background: 'linear-gradient(to top, var(--bg-primary) 0%, color-mix(in srgb, var(--bg-primary) 82%, transparent) 48%, transparent 100%)',
-            maskImage: 'linear-gradient(to top, black 0%, black 58%, transparent 100%)',
-            WebkitMaskImage: 'linear-gradient(to top, black 0%, black 58%, transparent 100%)',
-          }}
-        />
         <div className="absolute right-0 bottom-4 left-0 grid place-items-center px-5">
         <div className="pointer-events-auto w-full max-w-[min(64rem,calc(100%-2.5rem))]">
           <PromptInput
             accept="image/*"
-            className="persona-prompt-input w-full **:data-[slot=input-group]:border-border **:data-[slot=input-group]:bg-surface **:data-[slot=input-group]:shadow-lg"
+            className="persona-prompt-input w-full **:data-[slot=input-group]:border-border **:data-[slot=input-group]:bg-surface/55 **:data-[slot=input-group]:shadow-lg"
             maxFiles={6}
             maxFileSize={8 * 1024 * 1024}
             multiple

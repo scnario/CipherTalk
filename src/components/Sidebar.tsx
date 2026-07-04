@@ -1,10 +1,11 @@
 ﻿import { useEffect, useState, type ReactElement, type CSSProperties, type Key } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { Avatar, Button, ScrollShadow, Separator, Tabs, Tooltip } from '@heroui/react'
-import { Home, MessageSquare, Database, Settings, SquareChevronLeft, SquareChevronRight, Download, Aperture, Bot, PawPrint, BookOpen, UserRoundPlus } from 'lucide-react'
-import { MCP } from '@lobehub/icons'
+import { House, Comment, Database, Gear, ChevronLeft, ChevronRight, ArrowDownToLine, Aperture, FaceRobot, Ghost, BookOpen, LogoMcp, PersonGear } from '@gravity-ui/icons'
 import packageJson from '../../package.json'
 import { useAppStore } from '../stores/appStore'
+import { usePluginStore, ensurePluginStoreSubscribed, selectEnabledPlugins } from '../stores/pluginStore'
+import { PluginIcon } from '../features/plugins/PluginIcon'
 import { useDeviceConnectStatus } from '../hooks/useDeviceConnectStatus'
 import { DeviceConnectStatusDot } from './DeviceConnectStatusDot'
 import DeviceConnectDialog from './DeviceConnectDialog'
@@ -43,6 +44,9 @@ function Sidebar({ autoCollapse = false }: { autoCollapse?: boolean }) {
  const [collapsed, setCollapsed] = useState(false)
  const [deviceConnectOpen, setDeviceConnectOpen] = useState(false)
   const [diaryEnabled, setDiaryEnabled] = useState(true)
+  const plugins = usePluginStore(state => state.plugins)
+
+  useEffect(() => { ensurePluginStoreSubscribed() }, [])
  const userDisplayName = userInfo?.nickName?.trim() || userInfo?.alias?.trim() || '未连接用户'
   const userInitial = userDisplayName.slice(0, 1).toUpperCase()
 
@@ -80,17 +84,31 @@ function Sidebar({ autoCollapse = false }: { autoCollapse?: boolean }) {
   }
 
   const navItems: NavItemConfig[] = [
-    { key: 'home', label: '首页', icon: <Home size={NAV_ICON_SIZE} />, type: 'route', path: '/home' },
-    { key: 'agent', label: 'CT-Agent', icon: <Bot size={NAV_ICON_SIZE} />, type: 'route', path: '/agent' },
-    { key: 'personas', label: 'AI 克隆', icon: <UserRoundPlus size={NAV_ICON_SIZE} />, type: 'route', path: '/personas' },
-    { key: 'diary', label: '日记', icon: <BookOpen size={NAV_ICON_SIZE} />, type: 'route', path: '/diary' },
-    { key: 'pets', label: 'AI 宠物', icon: <PawPrint size={NAV_ICON_SIZE} />, type: 'route', path: '/pets' },
-    { key: 'chat', label: '聊天查看', icon: <MessageSquare size={NAV_ICON_SIZE} />, type: 'action', onClick: openChatWindow },
-    { key: 'moments', label: '朋友圈', icon: <Aperture size={NAV_ICON_SIZE} />, type: 'action', onClick: openMomentsWindow },
-    { key: 'export', label: '导出数据', icon: <Download size={NAV_ICON_SIZE} />, type: 'route', path: '/export' },
-    { key: 'data-management', label: '数据管理', icon: <Database size={NAV_ICON_SIZE} />, type: 'route', path: '/data-management' },
-    { key: 'mcp', label: 'MCP & Skills', icon: <MCP size={NAV_ICON_SIZE} />, type: 'route', path: '/mcp' },
+    { key: 'home', label: '首页', icon: <House width={NAV_ICON_SIZE} height={NAV_ICON_SIZE} />, type: 'route', path: '/home' },
+    { key: 'agent', label: 'CT-Agent', icon: <FaceRobot width={NAV_ICON_SIZE} height={NAV_ICON_SIZE} />, type: 'route', path: '/agent' },
+    { key: 'personas', label: 'AI 克隆', icon: <PersonGear width={NAV_ICON_SIZE} height={NAV_ICON_SIZE} />, type: 'route', path: '/personas' },
+    { key: 'diary', label: '日记', icon: <BookOpen width={NAV_ICON_SIZE} height={NAV_ICON_SIZE} />, type: 'route', path: '/diary' },
+    { key: 'pets', label: 'AI 宠物', icon: <Ghost width={NAV_ICON_SIZE} height={NAV_ICON_SIZE} />, type: 'route', path: '/pets' },
+    { key: 'chat', label: '聊天查看', icon: <Comment width={NAV_ICON_SIZE} height={NAV_ICON_SIZE} />, type: 'action', onClick: openChatWindow },
+    { key: 'moments', label: '朋友圈', icon: <Aperture width={NAV_ICON_SIZE} height={NAV_ICON_SIZE} />, type: 'action', onClick: openMomentsWindow },
+    { key: 'export', label: '导出数据', icon: <ArrowDownToLine width={NAV_ICON_SIZE} height={NAV_ICON_SIZE} />, type: 'route', path: '/export' },
+    { key: 'data-management', label: '数据管理', icon: <Database width={NAV_ICON_SIZE} height={NAV_ICON_SIZE} />, type: 'route', path: '/data-management' },
+    { key: 'mcp', label: 'MCP & Skills', icon: <LogoMcp width={NAV_ICON_SIZE} height={NAV_ICON_SIZE} />, type: 'route', path: '/mcp' },
  ]
+
+  // 插件侧边栏贡献点（声明式：只读 manifest，不执行插件代码）
+  for (const plugin of selectEnabledPlugins(plugins)) {
+    for (const menu of plugin.contributes.sidebarMenus ?? []) {
+      navItems.push({
+        key: `plugin:${plugin.id}:${menu.id}`,
+        label: menu.label,
+        icon: <PluginIcon name={menu.icon} size={NAV_ICON_SIZE} />,
+        type: 'route',
+        path: `/plugin/${plugin.id}/${menu.view}`,
+      })
+    }
+  }
+
   const visibleNavItems = diaryEnabled ? navItems : navItems.filter((item) => item.key !== 'diary')
  const activeNavKey = navItems.find(item => item.type === 'route' && isActive(item.path))?.key
 
@@ -261,13 +279,13 @@ function Sidebar({ autoCollapse = false }: { autoCollapse?: boolean }) {
           })}
           {renderNavButton({
             label: '设置',
-            icon: <Settings size={SIDEBAR_ACTION_ICON_SIZE} />,
+            icon: <Gear width={SIDEBAR_ACTION_ICON_SIZE} height={SIDEBAR_ACTION_ICON_SIZE} />,
             active: isActive('/settings'),
             onPress: () => navigate('/settings'),
           })}
           {renderNavButton({
             label: collapsed ? '展开' : '收回',
-            icon: collapsed ? <SquareChevronRight size={SIDEBAR_ACTION_ICON_SIZE} /> : <SquareChevronLeft size={SIDEBAR_ACTION_ICON_SIZE} />,
+            icon: collapsed ? <ChevronRight width={SIDEBAR_ACTION_ICON_SIZE} height={SIDEBAR_ACTION_ICON_SIZE} /> : <ChevronLeft width={SIDEBAR_ACTION_ICON_SIZE} height={SIDEBAR_ACTION_ICON_SIZE} />,
             onPress: () => setCollapsed(!collapsed),
           })}
         </div>

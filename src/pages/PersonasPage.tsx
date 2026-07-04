@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button, SearchField, Tabs } from '@heroui/react'
-import { Bot, Loader2, RefreshCw, UserRoundPlus, UsersRound } from 'lucide-react'
+import { ArrowsRotateLeft, CircleDashed, FaceRobot, PersonPlus, Persons } from '@gravity-ui/icons'
 import { List } from 'react-window'
 import type { RowComponentProps } from 'react-window'
 import type { PersonaRecordInfo } from '../types/electron'
@@ -111,7 +111,7 @@ function PersonaSidebarRow(props: RowComponentProps<PersonaSidebarRowData>) {
       <div style={style} className="flex items-center justify-center px-3 text-xs text-muted">
         {loadingContactsMore ? (
           <span className="inline-flex items-center gap-2">
-            <Loader2 className="size-3.5 animate-spin" />
+            <CircleDashed className="size-3.5 animate-spin" />
             正在加载更多...
           </span>
         ) : contactsHasMore ? (
@@ -359,7 +359,7 @@ export default function PersonasPage() {
               <p className="mt-1 text-xs text-muted">{personas.length ? `${personas.length} 个数字分身` : '选择联系人开始克隆'}</p>
             </div>
             <Button isIconOnly size="sm" variant="ghost" aria-label="刷新" isDisabled={loading} onPress={refresh}>
-              <RefreshCw className={cn('size-4', loading && 'animate-spin')} />
+              <ArrowsRotateLeft className={cn('size-4', loading && 'animate-spin')} />
             </Button>
           </div>
 
@@ -387,12 +387,12 @@ export default function PersonasPage() {
             <Tabs.ListContainer>
               <Tabs.List aria-label="联系人范围" className="w-full *:h-8 *:flex-1 *:gap-1.5 *:text-xs">
                 <Tabs.Tab id="all">
-                  <UsersRound className="size-3.5" />
+                  <Persons className="size-3.5" />
                   全部联系人
                   <Tabs.Indicator />
                 </Tabs.Tab>
                 <Tabs.Tab id="cloned">
-                  <Bot className="size-3.5" />
+                  <FaceRobot className="size-3.5" />
                   已克隆
                   <Tabs.Indicator />
                 </Tabs.Tab>
@@ -404,14 +404,14 @@ export default function PersonasPage() {
         <div className="min-h-0 flex-1 overflow-hidden py-2">
           {loading && listItems.length === 0 ? (
             <div className="flex h-40 items-center justify-center gap-2 text-sm text-muted">
-              <Loader2 className="size-4 animate-spin" />
+              <CircleDashed className="size-4 animate-spin" />
               正在读取联系人...
             </div>
           ) : error ? (
             <div className="m-2 rounded-lg bg-danger-soft p-3 text-sm text-danger-soft-foreground">{error}</div>
           ) : listItems.length === 0 ? (
             <div className="flex h-40 flex-col items-center justify-center gap-2 text-center text-sm text-muted">
-              <UserRoundPlus className="size-6" />
+              <PersonPlus className="size-6" />
               <span>{mode === 'cloned' ? '还没有数字分身' : '没有匹配的联系人'}</span>
             </div>
           ) : (
@@ -447,7 +447,7 @@ export default function PersonasPage() {
         ) : (
           <div className="flex h-full flex-col items-center justify-center gap-3 text-center text-muted">
             <div className="flex size-14 items-center justify-center rounded-full bg-accent-soft text-accent-soft-foreground">
-              <UserRoundPlus className="size-6" />
+              <PersonPlus className="size-6" />
             </div>
             <div>
               <div className="text-sm font-semibold text-foreground">选择一个联系人</div>
