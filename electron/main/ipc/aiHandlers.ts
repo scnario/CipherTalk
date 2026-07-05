@@ -52,6 +52,32 @@ function lastUserTextFromUiMessages(messages: UIMessage[] = []): string {
   return ''
 }
 
+function stableUiMessageKey(message: UIMessage, fallbackIndex: number): string {
+  const anyMessage = message as any
+  const id = typeof anyMessage?.id === 'string' ? anyMessage.id.trim() : ''
+  if (id) return `id:${id}`
+  try {
+    return `body:${String(anyMessage?.role || '')}:${JSON.stringify(anyMessage?.parts ?? anyMessage?.content ?? null)}`
+  } catch {
+    return `idx:${fallbackIndex}:${String(anyMessage?.role || '')}`
+  }
+}
+
+function mergeUiMessagesById(dbMessages: UIMessage[] = [], incomingMessages: UIMessage[] = []): UIMessage[] {
+  const seen = new Set<string>()
+  const merged: UIMessage[] = []
+  const push = (message: UIMessage, index: number) => {
+    if (!message || typeof message !== 'object') return
+    const key = stableUiMessageKey(message, index)
+    if (seen.has(key)) return
+    seen.add(key)
+    merged.push(message)
+  }
+  dbMessages.forEach(push)
+  incomingMessages.forEach(push)
+  return merged
+}
+
 function localDateKey(date = new Date()): string {
   const pad = (value: number) => String(value).padStart(2, '0')
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
@@ -277,6 +303,12 @@ function createPersonaVoiceCachePrewarmer(input: {
 }
 
 export function registerAiHandlers(ctx: MainProcessContext): void {
+  void import('../../services/agent/conversationStore')
+    .then(({ setAgentConversationChangeBroadcaster }) => {
+      setAgentConversationChangeBroadcaster((event) => ctx.broadcastToWindows('agent:conversationUpdated', event))
+    })
+    .catch(() => undefined)
+
   void import('../../services/agent/agentCapabilityService')
     .then(({ agentCapabilityService }) => agentCapabilityService.setContext(ctx))
     .catch(() => undefined)
@@ -541,6 +573,7 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
     title?: string
     modelProvider?: string
     modelId?: string
+    originClientId?: string | null
   }) => {
     try {
       const { agentConversationStore } = await import('../../services/agent/conversationStore')
@@ -550,10 +583,12 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
     }
   })
 
-  ipcMain.handle('agent:deleteConversation', async (_event, id: number) => {
+  ipcMain.handle('agent:deleteConversation', async (_event, idOrPayload: number | { id?: number; originClientId?: string | null }) => {
     try {
       const { agentConversationStore } = await import('../../services/agent/conversationStore')
-      agentConversationStore.remove(Number(id))
+      const id = typeof idOrPayload === 'object' && idOrPayload ? Number(idOrPayload.id) : Number(idOrPayload)
+      const originClientId = typeof idOrPayload === 'object' && idOrPayload ? idOrPayload.originClientId : null
+      agentConversationStore.remove(id, { originClientId })
       return { success: true }
     } catch (e) {
       return { success: false, error: e instanceof Error ? e.message : String(e) }
@@ -584,18 +619,51 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
     scope?: AgentScope
     modelProvider?: string
     modelId?: string
+    baseUpdatedAt?: number
+    mergeIfStale?: boolean
+    originClientId?: string | null
   }) => {
     try {
       const { agentConversationStore } = await import('../../services/agent/conversationStore')
+      const id = Number(payload.id)
+      const loadedBeforeSave = agentConversationStore.load(id)
+      if (!loadedBeforeSave) return { success: false, error: 'AI 对话不存在' }
+
+      const baseUpdatedAt = Number(payload.baseUpdatedAt)
+      const hasVersion = Number.isFinite(baseUpdatedAt) && baseUpdatedAt > 0
+      const isStale = hasVersion && Number(loadedBeforeSave.updatedAt || 0) > baseUpdatedAt
+      const shouldMergeIfStale = payload.mergeIfStale !== false
+      const nextMessages = isStale && shouldMergeIfStale
+        ? mergeUiMessagesById(loadedBeforeSave.messages, payload.messages || [])
+        : (payload.messages || [])
+      const originClientId = payload.originClientId ?? null
+
       if (payload.scope || payload.modelProvider !== undefined || payload.modelId !== undefined) {
-        agentConversationStore.updateMeta(Number(payload.id), {
+        agentConversationStore.updateMeta(id, {
           scope: payload.scope,
           modelProvider: payload.modelProvider,
           modelId: payload.modelId,
-        })
+        }, { originClientId })
       }
-      const conversation = agentConversationStore.replaceMessages(Number(payload.id), payload.messages || [])
-      return { success: true, conversation }
+      const conversation = agentConversationStore.replaceMessages(id, nextMessages, { originClientId })
+      return { success: true, conversation, staleMerged: isStale && shouldMergeIfStale }
+    } catch (e) {
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  })
+
+  ipcMain.handle('agent:sendConversationReplyToWechat', async (_event, payload: {
+    conversationId?: number
+    messageId?: string
+    bubbles?: string[]
+  }) => {
+    try {
+      const { weixinBotService } = await import('../../services/deviceConnect/weixinBotService')
+      return await weixinBotService.sendConversationReplyToWechat({
+        conversationId: Number(payload?.conversationId || 0),
+        messageId: String(payload?.messageId || ''),
+        bubbles: Array.isArray(payload?.bubbles) ? payload.bubbles.map((item) => String(item || '')) : [],
+      })
     } catch (e) {
       return { success: false, error: e instanceof Error ? e.message : String(e) }
     }
@@ -1243,7 +1311,9 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
   ipcMain.handle('persona:list', async () => {
     try {
       const { personaStore } = await import('../../services/agent/persona/personaStore')
-      return { success: true, personas: personaStore.list().map((persona) => sanitizePersonaForRenderer(persona)) }
+      // self: 前缀是"克隆我自己"的自画像（只供回复建议用），不算克隆的好友，不进列表
+      const personas = personaStore.list().filter((persona) => !persona.sessionId.startsWith('self:'))
+      return { success: true, personas: personas.map((persona) => sanitizePersonaForRenderer(persona)) }
     } catch (e) {
       return { success: false, error: e instanceof Error ? e.message : String(e) }
     }
@@ -1530,6 +1600,73 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
     } catch (e) {
       return { success: false, error: e instanceof Error ? e.message : String(e) }
     }
+  })
+
+  ipcMain.handle('agent:replySuggest', async (_event, payload: {
+    input: Omit<import('../../services/agent/engine').ReplySuggestInput, 'providerConfig'>
+    modelConfig?: AgentProviderConfigOverride | null
+  }) => {
+    try {
+      const { agentProcessService } = await import('../../services/agent/agentProcessService')
+      const { resolveProviderConfig } = await import('../../services/agent/resolveProviderConfig')
+      const { refreshResolvedProxyUrl } = await import('../../services/ai/proxyFetch')
+      await refreshResolvedProxyUrl()
+      const input = payload.input
+      if (input.deep === true) {
+        const { agentProfileService } = await import('../../services/agent/agentProfileService')
+        const sessionId = String(input.sessionId || '').trim()
+        const contactName = String(input.contactName || '').trim()
+        const queryText = input.context.map((m) => m.text).join('\n').slice(-2000)
+        const profile = await agentProfileService.resolve({
+          mode: 'app',
+          scope: sessionId ? { kind: 'session', sessionId, displayName: contactName || undefined } : { kind: 'global' },
+          modelConfig: payload.modelConfig,
+          toolProfile: 'hybrid',
+          includeMcpSkills: true,
+          queryText,
+        })
+        const result = await agentProcessService.replySuggest({
+          ...input,
+          providerConfig: profile.providerConfig,
+          mcpTools: profile.mcpTools,
+          skills: profile.skills,
+          toolProfile: profile.toolProfile,
+          codeWorkspace: profile.codeWorkspace,
+        })
+        return { success: true, ...result }
+      }
+      const providerConfig = resolveProviderConfig(payload.modelConfig)
+      const result = await agentProcessService.replySuggest({
+        ...input,
+        providerConfig,
+      })
+      return { success: true, ...result }
+    } catch (e) {
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  })
+
+  // 克隆我自己：用与克隆好友一致的 AI 管线提炼"我"对此联系人的说话风格自画像，
+  // 按 self: 前缀存储；供"像我"回复建议使用。进度经 persona:buildProgress 推回（sessionId='self:'+原sessionId）
+  ipcMain.handle('persona:buildSelf', async (event, payload: { sessionId: string; displayName?: string }) => {
+    const sender = event.sender
+    const sessionId = String(payload?.sessionId || '').trim()
+    const displayName = String(payload?.displayName || '').trim() || sessionId
+    const logger = ctx.getLogService()
+    const { buildPersonaFromSession } = await import('../../services/agent/persona/personaBuildService')
+    const result = await buildPersonaFromSession({
+      sessionId,
+      displayName,
+      role: 'self',
+      logger,
+      onProgress: (progress) => {
+        if (!sender.isDestroyed()) sender.send('persona:buildProgress', progress)
+      },
+    })
+    if (result.success && result.persona) {
+      return { ...result, persona: sanitizePersonaForRenderer(result.persona) }
+    }
+    return result
   })
 
 

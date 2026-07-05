@@ -19,7 +19,8 @@ import { appUpdateService } from '../../services/appUpdateService'
 import { mcpProxyService } from '../../services/mcp/proxyService'
 import { voiceTranscribeServiceWhisper } from '../../services/voiceTranscribeServiceWhisper'
 import { attachWindowStartupDiagnostics, markStartupMilestone, logStartupError } from '../startupDiagnostics'
-import type { ImageViewerOpenOptions, MainProcessContext, WindowManager } from '../context'
+import type { ImageViewerOpenOptions, MainProcessContext, ReplyTileEntry, WindowManager } from '../context'
+import { placeNativeWindowBehindForeground, probeWeChatWindow, watchWeChatWindowEvents } from '../../services/wechatWindowTracker'
 
 type ReleaseAnnouncementPayload = {
   version: string
@@ -29,6 +30,10 @@ type ReleaseAnnouncementPayload = {
 }
 
 const MAIN_WINDOW_ROUTES = new Set(['/home', '/agent', '/settings', '/pets', '/diary', '/export'])
+
+function supportsReplyTileWindow(): boolean {
+  return process.platform === 'win32' || process.platform === 'darwin'
+}
 
 function getReleaseAnnouncementPath(): string {
   const isDev = !!process.env.VITE_DEV_SERVER_URL
@@ -277,6 +282,18 @@ export function createWindowManager(ctx: MainProcessContext): WindowManager {
   let personaChatWindow: BrowserWindow | null = null
   let posterStyleWindow: BrowserWindow | null = null
   let petWindow: BrowserWindow | null = null
+  let replyTileWindow: BrowserWindow | null = null
+  let replyTileTimer: NodeJS.Timeout | null = null
+  let replyTileEventWatchDisposer: (() => void) | null = null
+  let replyTileEventWatchStartedAt = 0
+  let replyTileRepositionQueued = false
+  let replyTileLastFallbackPollAt = 0
+  let replyTileLastBounds = ''
+  let replyTileFloating = true
+  let replyTileEnabled = false
+  // 磁贴里各会话最新条目，供新建/重载窗口后回灌
+  const replyTileEntries = new Map<string, ReplyTileEntry>()
+  const REPLY_TILE_WIDTH = 340
   let petBaseBounds: { x: number; y: number; width: number; height: number } | null = null
   // 桌宠基础尺寸（与 openPetWindow 一致）；显示消息气泡时临时向上/左扩窗腾出空间
   const PET_BASE_WIDTH = 150
@@ -295,6 +312,155 @@ export function createWindowManager(ctx: MainProcessContext): WindowManager {
     petWindow = null
     petBaseBounds = null
     petBubbleExpanded = false
+  }
+
+  const closeReplyTileInternal = (): void => {
+    if (replyTileTimer) { clearInterval(replyTileTimer); replyTileTimer = null }
+    if (replyTileEventWatchDisposer) { replyTileEventWatchDisposer(); replyTileEventWatchDisposer = null }
+    replyTileEventWatchStartedAt = 0
+    if (replyTileWindow && !replyTileWindow.isDestroyed()) replyTileWindow.close()
+    replyTileWindow = null
+    replyTileRepositionQueued = false
+    replyTileLastFallbackPollAt = 0
+    replyTileLastBounds = ''
+    replyTileFloating = true
+  }
+
+  const setReplyTileFloating = (floating: boolean): void => {
+    if (!replyTileWindow || replyTileWindow.isDestroyed() || replyTileFloating === floating) return
+    replyTileFloating = floating
+    if (floating) replyTileWindow.setAlwaysOnTop(true, 'screen-saver')
+    else replyTileWindow.setAlwaysOnTop(false)
+  }
+
+  const rectsOverlap = (
+    a: { x: number; y: number; width: number; height: number },
+    b: { x: number; y: number; width: number; height: number }
+  ): boolean => {
+    return a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y
+  }
+
+  // Reply tile follows the WeChat main window edge.
+  // Do not hide it just because another app becomes foreground; hide only when WeChat is missing/minimized.
+  const repositionReplyTile = (): void => {
+    if (!replyTileWindow || replyTileWindow.isDestroyed()) return
+    const state = probeWeChatWindow()
+    const show = state.found && !state.minimized && state.bounds
+    if (!show) {
+      if (replyTileWindow.isVisible()) replyTileWindow.hide()
+      return
+    }
+    const tileFocused = replyTileWindow.isFocused()
+    const shouldFloat = state.foregroundActive || tileFocused
+    setReplyTileFloating(shouldFloat)
+    const wx = state.bounds!
+    const wa = screen.getDisplayMatching(wx).workArea
+    let x = wx.x + wx.width
+    if (x + REPLY_TILE_WIDTH > wa.x + wa.width) x = wx.x - REPLY_TILE_WIDTH // 翻到左侧
+    x = Math.max(wa.x, x)
+    const y = Math.max(wa.y, wx.y)
+    const height = Math.min(wx.height, wa.y + wa.height - y)
+    const bounds = { x: Math.round(x), y: Math.round(y), width: REPLY_TILE_WIDTH, height: Math.round(height) }
+    const key = `${bounds.x},${bounds.y},${bounds.height}`
+    if (key !== replyTileLastBounds) {
+      replyTileWindow.setBounds(bounds)
+      replyTileLastBounds = key
+    }
+    if (!replyTileWindow.isVisible()) replyTileWindow.showInactive()
+    if (!shouldFloat && state.otherForegroundActive && state.foregroundBounds && rectsOverlap(bounds, state.foregroundBounds)) {
+      placeNativeWindowBehindForeground(replyTileWindow.getNativeWindowHandle())
+    }
+  }
+
+  const scheduleReplyTileReposition = (): void => {
+    if (replyTileRepositionQueued) return
+    replyTileRepositionQueued = true
+    setImmediate(() => {
+      replyTileRepositionQueued = false
+      repositionReplyTile()
+    })
+  }
+
+  const startReplyTileEventWatch = (): void => {
+    if (replyTileEventWatchDisposer) return
+    replyTileEventWatchDisposer = watchWeChatWindowEvents(scheduleReplyTileReposition)
+    replyTileEventWatchStartedAt = replyTileEventWatchDisposer ? Date.now() : 0
+  }
+
+  const refreshReplyTileEventWatch = (): void => {
+    if (replyTileEventWatchDisposer && Date.now() - replyTileEventWatchStartedAt < 10000) return
+    if (replyTileEventWatchDisposer) { replyTileEventWatchDisposer(); replyTileEventWatchDisposer = null }
+    replyTileEventWatchStartedAt = 0
+    startReplyTileEventWatch()
+  }
+
+  const openReplyTileWindow = (): void => {
+    if (replyTileWindow && !replyTileWindow.isDestroyed()) return
+    replyTileWindow = new BrowserWindow({
+      width: REPLY_TILE_WIDTH,
+      height: 400,
+      frame: false,
+      titleBarStyle: 'hidden',
+      trafficLightPosition: { x: -100, y: -100 },
+      transparent: true,
+      backgroundColor: '#00000000',
+      resizable: false,
+      maximizable: false,
+      minimizable: false,
+      fullscreenable: false,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      hasShadow: false,
+      show: false,
+      webPreferences: {
+        preload: join(__dirname, 'preload.js'),
+        devTools: ctx.allowDevTools,
+        contextIsolation: true,
+        nodeIntegration: false,
+        webSecurity: false
+      }
+    })
+    hideMacWindowControls(replyTileWindow)
+    replyTileWindow.once('ready-to-show', () => {
+      if (replyTileWindow && !replyTileWindow.isDestroyed()) hideMacWindowControls(replyTileWindow)
+    })
+    replyTileWindow.on('show', () => {
+      if (replyTileWindow && !replyTileWindow.isDestroyed()) hideMacWindowControls(replyTileWindow)
+    })
+    replyTileWindow.on('focus', () => {
+      if (replyTileWindow && !replyTileWindow.isDestroyed()) hideMacWindowControls(replyTileWindow)
+    })
+    replyTileWindow.setAlwaysOnTop(true, 'screen-saver')
+    replyTileWindow.on('closed', () => {
+      if (replyTileTimer) { clearInterval(replyTileTimer); replyTileTimer = null }
+      if (replyTileEventWatchDisposer) { replyTileEventWatchDisposer(); replyTileEventWatchDisposer = null }
+      replyTileEventWatchStartedAt = 0
+      replyTileWindow = null
+      replyTileRepositionQueued = false
+      replyTileLastFallbackPollAt = 0
+      replyTileLastBounds = ''
+      replyTileFloating = true
+    })
+    // 窗口加载完成后回灌现有条目（新建/重载都能拿到当前全量）
+    replyTileWindow.webContents.on('did-finish-load', () => {
+      if (!replyTileWindow || replyTileWindow.isDestroyed()) return
+      for (const entry of replyTileEntries.values()) {
+        replyTileWindow.webContents.send('reply-tile:update', entry)
+      }
+    })
+    loadWindowRoute(ctx, replyTileWindow, '/reply-tile-window')
+    startReplyTileEventWatch()
+    replyTileTimer = setInterval(() => {
+      const now = Date.now()
+      const fallbackMs = replyTileEventWatchDisposer ? 1000 : (process.platform === 'darwin' ? 600 : 120)
+      if (now - replyTileLastFallbackPollAt >= fallbackMs) {
+        replyTileLastFallbackPollAt = now
+        repositionReplyTile()
+      }
+      refreshReplyTileEventWatch()
+    }, 120)
+    replyTileTimer.unref?.()
+    repositionReplyTile()
   }
 
   const setPetWindowMaterial = (_expanded: boolean): void => {
@@ -1404,6 +1570,31 @@ export function createWindowManager(ctx: MainProcessContext): WindowManager {
       if (!expanded) {
         petBaseBounds = null
       }
+    },
+
+    setReplyTileEnabled(enabled: boolean) {
+      if (!supportsReplyTileWindow()) return
+      replyTileEnabled = enabled
+      if (enabled) {
+        openReplyTileWindow()
+      } else {
+        replyTileEntries.clear()
+        closeReplyTileInternal()
+      }
+    },
+
+    isReplyTileEnabled() {
+      return replyTileEnabled
+    },
+
+    updateReplyTileEntry(entry: ReplyTileEntry) {
+      if (!replyTileEnabled) return
+      if (entry.state === 'gone') replyTileEntries.delete(entry.sessionId)
+      else replyTileEntries.set(entry.sessionId, entry)
+      if (replyTileWindow && !replyTileWindow.isDestroyed() && !replyTileWindow.webContents.isLoading()) {
+        replyTileWindow.webContents.send('reply-tile:update', entry)
+      }
+      // 窗口还在加载时不单独发：did-finish-load 会回灌全量
     }
   }
 

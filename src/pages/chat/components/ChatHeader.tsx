@@ -1,12 +1,26 @@
-import { Aperture, ArrowDownToLine, ArrowsRotateLeft, Bell, BellSlash, CircleDashed, CircleInfo, FaceRobot, FileText, Layers, Microphone, Picture, Sparkles } from '@gravity-ui/icons'
+import { Aperture, ArrowDownToLine, ArrowsRotateLeft, Bell, BellSlash, Bulb, CircleCheck, CircleDashed, CircleInfo, FaceRobot, FileText, Layers, LayoutSideContentRight, Microphone, Picture, Sparkles } from '@gravity-ui/icons'
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
-import { Button, Drawer, Dropdown, Label, Tooltip } from '@heroui/react'
+import { Button, Drawer, Dropdown, Label, Switch, Tooltip } from '@heroui/react'
+import { CloneSelfModal } from './CloneSelfModal'
 import { DateJumpPicker } from './DateJumpPicker'
 import type { ChatSession } from '../../../types/models'
 import type { EmbeddingBuildProgress, EmbeddingBuildTarget, EmbeddingVectorStoreInfo } from '../../../types/electron'
 import { isGroupChat } from '../utils/messageGuards'
+import {
+  DEFAULT_REPLY_SUGGEST_SETTINGS,
+  REPLY_SUGGEST_CONFIG_KEY,
+  REPLY_SUGGEST_COUNTS,
+  REPLY_SUGGEST_STYLES,
+  type ReplySuggestSettings,
+  type ReplySuggestStyle,
+  getReplySuggestSettings,
+  updateReplySuggestSettings,
+} from '../replySuggest'
 import { SessionAvatar } from './SessionSidebar'
 import PluginChatToolbar from '../../../features/plugins/PluginChatToolbar'
+
+// 磁贴窗口支持 Windows/macOS；Linux 暂不显示该开关。
+const SUPPORTS_REPLY_TILE = /win|mac/.test(navigator.platform.toLowerCase())
 
 type Progress = {
   current: number
@@ -194,6 +208,43 @@ export function ChatHeader({
       void window.electronAPI.notify.setSessionEnabled(currentSession.username, next)
       return next
     })
+  }, [currentSession.username])
+
+  // 回复建议设置：会话级，改动写回 config；ReplySuggestBar 靠 config.onChanged 同步
+  const [replySettings, setReplySettings] = useState<ReplySuggestSettings>(DEFAULT_REPLY_SUGGEST_SETTINGS)
+  useEffect(() => {
+    let cancelled = false
+    void getReplySuggestSettings(currentSession.username).then((s) => {
+      if (!cancelled) setReplySettings(s)
+    })
+    const off = window.electronAPI.config.onChanged(({ key }) => {
+      if (key !== REPLY_SUGGEST_CONFIG_KEY) return
+      void getReplySuggestSettings(currentSession.username).then((s) => {
+        if (!cancelled) setReplySettings(s)
+      })
+    })
+    return () => { cancelled = true; off() }
+  }, [currentSession.username])
+
+  const patchReplySettings = useCallback((patch: Partial<ReplySuggestSettings>) => {
+    // 打开自动建议时联动打开「参与磁贴」（可随后单独关闭）
+    const effective = patch.enabled === true ? { ...patch, tile: true } : patch
+    setReplySettings((prev) => ({ ...prev, ...effective }))
+    void updateReplySuggestSettings(currentSession.username, effective).then(() => {
+      // 配置写入后再重算参与列表，避免主进程读到旧配置。
+      window.electronAPI.window.replyTileRefresh()
+    })
+  }, [currentSession.username])
+
+  // 自画像状态：是否已克隆"我"对此联系人的说话画像（self: 前缀键），用于菜单显示
+  const [myPersonaExists, setMyPersonaExists] = useState(false)
+  const [cloneSelfOpen, setCloneSelfOpen] = useState(false)
+  useEffect(() => {
+    let cancelled = false
+    void window.electronAPI.persona.get(`self:${currentSession.username}`).then((res) => {
+      if (!cancelled) setMyPersonaExists(!!(res.success && res.persona))
+    })
+    return () => { cancelled = true }
   }, [currentSession.username])
 
   const syncDetailDrawerBounds = useCallback(() => {
@@ -445,40 +496,45 @@ export function ChatHeader({
           <Tooltip.Content placement="bottom">刷新消息</Tooltip.Content>
         </Tooltip>
 
-        <Dropdown>
-          <Button
-            isIconOnly
-            size="sm"
-            variant="ghost"
-            aria-label="向量化（语义索引）"
-            isDisabled={vecDisabled}
-          >
-            {vecBuilding
-              ? <CircleDashed width={18} height={18} className="animate-spin" />
-              : <Sparkles width={18} height={18} className={(vecStatus && (vecStatus.count > 0 || vecStatus.mediaCount > 0)) ? 'text-primary' : ''} />}
-          </Button>
-          <Dropdown.Popover className="min-w-64" placement="bottom end">
-            <Dropdown.Menu
-              disabledKeys={vecStatus && !vecStatus.mediaEnabled ? ['image'] : undefined}
-              onAction={(key) => void handleVectorize(String(key) as EmbeddingBuildTarget)}
-            >
-              <Dropdown.Item id="text" textValue="向量化文本">
-                <FileText className="size-4 shrink-0 text-muted" />
-                <Label>向量化文本</Label>
-                <span className="ml-auto text-muted-foreground text-xs">{vecStore?.count ?? vecStatus?.count ?? 0} 段</span>
-              </Dropdown.Item>
-              <Dropdown.Item id="image" textValue="向量化图片">
-                <Picture className="size-4 shrink-0 text-muted" />
-                <Label>向量化图片</Label>
-                <span className="ml-auto text-muted-foreground text-xs">{vecStore?.mediaCount ?? vecStatus?.mediaCount ?? 0} 张</span>
-              </Dropdown.Item>
-              <Dropdown.Item id="all" textValue="向量化文本和图片">
-                <Layers className="size-4 shrink-0 text-muted" />
-                <Label>向量化全部</Label>
-              </Dropdown.Item>
-            </Dropdown.Menu>
-          </Dropdown.Popover>
-        </Dropdown>
+        <Tooltip delay={0}>
+          <Tooltip.Trigger>
+            <Dropdown>
+              <Button
+                isIconOnly
+                size="sm"
+                variant="ghost"
+                aria-label="向量化（语义索引）"
+                isDisabled={vecDisabled}
+              >
+                {vecBuilding
+                  ? <CircleDashed width={18} height={18} className="animate-spin" />
+                  : <Sparkles width={18} height={18} className={(vecStatus && (vecStatus.count > 0 || vecStatus.mediaCount > 0)) ? 'text-primary' : ''} />}
+              </Button>
+              <Dropdown.Popover className="min-w-64" placement="bottom end">
+                <Dropdown.Menu
+                  disabledKeys={vecStatus && !vecStatus.mediaEnabled ? ['image'] : undefined}
+                  onAction={(key) => void handleVectorize(String(key) as EmbeddingBuildTarget)}
+                >
+                  <Dropdown.Item id="text" textValue="向量化文本">
+                    <FileText className="size-4 shrink-0 text-muted" />
+                    <Label>向量化文本</Label>
+                    <span className="ml-auto text-muted-foreground text-xs">{vecStore?.count ?? vecStatus?.count ?? 0} 段</span>
+                  </Dropdown.Item>
+                  <Dropdown.Item id="image" textValue="向量化图片">
+                    <Picture className="size-4 shrink-0 text-muted" />
+                    <Label>向量化图片</Label>
+                    <span className="ml-auto text-muted-foreground text-xs">{vecStore?.mediaCount ?? vecStatus?.mediaCount ?? 0} 张</span>
+                  </Dropdown.Item>
+                  <Dropdown.Item id="all" textValue="向量化文本和图片">
+                    <Layers className="size-4 shrink-0 text-muted" />
+                    <Label>向量化全部</Label>
+                  </Dropdown.Item>
+                </Dropdown.Menu>
+              </Dropdown.Popover>
+            </Dropdown>
+          </Tooltip.Trigger>
+          <Tooltip.Content placement="bottom">{vecTooltip}</Tooltip.Content>
+        </Tooltip>
 
         {isPrivateSession && (
           <Tooltip delay={0}>
@@ -494,6 +550,145 @@ export function ChatHeader({
               </Button>
             </Tooltip.Trigger>
             <Tooltip.Content placement="bottom">{notifyEnabled ? '新消息提醒已开启 · 点击关闭' : '开启新消息提醒（桌宠气泡）'}</Tooltip.Content>
+          </Tooltip>
+        )}
+
+        {isPrivateSession && (
+          <Tooltip delay={0}>
+            <Tooltip.Trigger>
+              <Dropdown>
+                <Button
+                  isIconOnly
+                  size="sm"
+                  variant="ghost"
+                  aria-label="回复建议设置"
+                >
+                  <Bulb width={18} height={18} className={replySettings.enabled ? 'text-primary' : ''} />
+                </Button>
+                <Dropdown.Popover className="min-w-56" placement="bottom end">
+              <Dropdown.Menu
+                onAction={(key) => {
+                  // 自动建议/深度模式由各自的 Switch 独立切换，不走整行 onAction
+                  if (key === 'cloneSelf') setCloneSelfOpen(true)
+                }}
+              >
+                <Dropdown.Item id="cloneSelf" textValue="克隆我自己">
+                  <FaceRobot className="size-4 shrink-0 text-muted" />
+                  <Label>{myPersonaExists ? '重建我的自画像' : '克隆我自己'}</Label>
+                  <span className={`ml-auto text-xs ${myPersonaExists ? 'text-success' : 'text-muted-foreground'}`}>
+                    {myPersonaExists ? (
+                      <span className="inline-flex items-center gap-0.5">
+                        <CircleCheck width={12} height={12} />
+                        已克隆
+                      </span>
+                    ) : '未克隆'}
+                  </span>
+                </Dropdown.Item>
+                <Dropdown.Item id="toggle" textValue="自动建议">
+                  <Bulb className="size-4 shrink-0 text-muted" />
+                  <Label>自动建议</Label>
+                  <span
+                    className="ml-auto inline-flex pointer-events-auto"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <Switch
+                      aria-label="自动建议"
+                      isSelected={replySettings.enabled}
+                      onChange={(v) => patchReplySettings({ enabled: v })}
+                    >
+                      <Switch.Control>
+                        <Switch.Thumb />
+                      </Switch.Control>
+                    </Switch>
+                  </span>
+                </Dropdown.Item>
+                <Dropdown.Item id="deep" textValue="深度模式">
+                  <Layers className="size-4 shrink-0 text-muted" />
+                  <Label>深度模式</Label>
+                  <span
+                    className="ml-auto inline-flex pointer-events-auto"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <Switch
+                      aria-label="深度模式"
+                      isSelected={replySettings.deep}
+                      onChange={(v) => patchReplySettings({ deep: v })}
+                    >
+                      <Switch.Control>
+                        <Switch.Thumb />
+                      </Switch.Control>
+                    </Switch>
+                  </span>
+                </Dropdown.Item>
+                {SUPPORTS_REPLY_TILE && (
+                  <Dropdown.Item id="tile" textValue="磁贴窗口">
+                    <LayoutSideContentRight className="size-4 shrink-0 text-muted" />
+                    <Label>磁贴窗口</Label>
+                    <span
+                      className="ml-auto inline-flex pointer-events-auto"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <Switch
+                        aria-label="磁贴窗口"
+                        isSelected={replySettings.tile}
+                        onChange={(v) => patchReplySettings({ tile: v })}
+                      >
+                        <Switch.Control>
+                          <Switch.Thumb />
+                        </Switch.Control>
+                      </Switch>
+                    </span>
+                  </Dropdown.Item>
+                )}
+                <Dropdown.SubmenuTrigger>
+                  <Dropdown.Item id="style" textValue="风格">
+                    <Label className="min-w-0 flex-1 text-left">风格</Label>
+                    <span className="shrink-0 text-muted-foreground text-xs">
+                      {REPLY_SUGGEST_STYLES.find((s) => s.id === replySettings.style)?.label}
+                    </span>
+                    <Dropdown.SubmenuIndicator />
+                  </Dropdown.Item>
+                  <Dropdown.Popover className="min-w-36" placement="right top">
+                    <Dropdown.Menu
+                      selectedKeys={new Set([replySettings.style])}
+                      selectionMode="single"
+                      onAction={(key) => patchReplySettings({ style: String(key) as ReplySuggestStyle })}
+                    >
+                      {REPLY_SUGGEST_STYLES.map((style) => (
+                        <Dropdown.Item id={style.id} key={style.id} textValue={style.label}>
+                          <Dropdown.ItemIndicator />
+                          <Label>{style.label}</Label>
+                        </Dropdown.Item>
+                      ))}
+                    </Dropdown.Menu>
+                  </Dropdown.Popover>
+                </Dropdown.SubmenuTrigger>
+                <Dropdown.SubmenuTrigger>
+                  <Dropdown.Item id="count" textValue="建议数量">
+                    <Label className="min-w-0 flex-1 text-left">建议数量</Label>
+                    <span className="shrink-0 text-muted-foreground text-xs">{replySettings.count} 条</span>
+                    <Dropdown.SubmenuIndicator />
+                  </Dropdown.Item>
+                  <Dropdown.Popover className="min-w-28" placement="right top">
+                    <Dropdown.Menu
+                      selectedKeys={new Set([String(replySettings.count)])}
+                      selectionMode="single"
+                      onAction={(key) => patchReplySettings({ count: Number(key) })}
+                    >
+                      {REPLY_SUGGEST_COUNTS.map((count) => (
+                        <Dropdown.Item id={String(count)} key={count} textValue={`${count} 条`}>
+                          <Dropdown.ItemIndicator />
+                          <Label>{count} 条</Label>
+                        </Dropdown.Item>
+                      ))}
+                    </Dropdown.Menu>
+                  </Dropdown.Popover>
+                </Dropdown.SubmenuTrigger>
+              </Dropdown.Menu>
+            </Dropdown.Popover>
+          </Dropdown>
+          </Tooltip.Trigger>
+          <Tooltip.Content placement="bottom">回复建议设置</Tooltip.Content>
           </Tooltip>
         )}
 
@@ -610,6 +805,22 @@ export function ChatHeader({
       </div>
 
       {detailDrawerHost ? detailDrawer : null}
+
+      {isPrivateSession && (
+        <CloneSelfModal
+          isOpen={cloneSelfOpen}
+          onOpenChange={(open) => {
+            setCloneSelfOpen(open)
+            // 关闭后刷新自画像存在状态（克隆完成/删除后会变）
+            if (!open) {
+              void window.electronAPI.persona.get(`self:${currentSession.username}`).then((res) => {
+                setMyPersonaExists(!!(res.success && res.persona))
+              })
+            }
+          }}
+          session={currentSession}
+        />
+      )}
     </div>
   )
 }

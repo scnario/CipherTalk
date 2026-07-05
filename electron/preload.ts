@@ -189,22 +189,31 @@ contextBridge.exposeInMainWorld('electronAPI', {
     abort: (runId: string) => ipcRenderer.invoke('agent:abort', runId) as Promise<{ success: boolean }>,
     generateTitle: (firstMessage: string, modelConfig?: unknown) =>
       ipcRenderer.invoke('agent:generateTitle', { firstMessage, modelConfig }) as Promise<{ success: boolean; title?: string; error?: string }>,
+    replySuggest: (input: unknown, modelConfig?: unknown) =>
+      ipcRenderer.invoke('agent:replySuggest', { input, modelConfig }) as Promise<{ success: boolean; suggestions?: string[]; error?: string }>,
     listConversations: (scope?: unknown) =>
       ipcRenderer.invoke('agent:listConversations', scope) as Promise<{ success: boolean; conversations?: unknown[]; error?: string }>,
     loadConversation: (id: number) =>
       ipcRenderer.invoke('agent:loadConversation', id) as Promise<{ success: boolean; conversation?: unknown; error?: string }>,
     createConversation: (payload: unknown) =>
       ipcRenderer.invoke('agent:createConversation', payload) as Promise<{ success: boolean; conversation?: unknown; error?: string }>,
-    deleteConversation: (id: number) =>
-      ipcRenderer.invoke('agent:deleteConversation', id) as Promise<{ success: boolean; error?: string }>,
+    deleteConversation: (idOrPayload: number | { id?: number; originClientId?: string | null }) =>
+      ipcRenderer.invoke('agent:deleteConversation', idOrPayload) as Promise<{ success: boolean; error?: string }>,
     deleteConversationsByScope: (scope: unknown) =>
       ipcRenderer.invoke('agent:deleteConversationsByScope', scope) as Promise<{ success: boolean; deleted?: number; error?: string }>,
     renameConversation: (id: number, title: string) =>
       ipcRenderer.invoke('agent:renameConversation', id, title) as Promise<{ success: boolean; conversation?: unknown; error?: string }>,
     saveConversationMessages: (payload: unknown) =>
-      ipcRenderer.invoke('agent:saveConversationMessages', payload) as Promise<{ success: boolean; conversation?: unknown; error?: string }>,
+      ipcRenderer.invoke('agent:saveConversationMessages', payload) as Promise<{ success: boolean; conversation?: unknown; staleMerged?: boolean; error?: string }>,
     getLastConversation: (scope?: unknown) =>
       ipcRenderer.invoke('agent:getLastConversation', scope) as Promise<{ success: boolean; conversation?: unknown; error?: string }>,
+    sendConversationReplyToWechat: (payload: { conversationId: number; messageId: string; bubbles: string[] }) =>
+      ipcRenderer.invoke('agent:sendConversationReplyToWechat', payload) as Promise<{ success: boolean; sent?: boolean; skipped?: boolean; error?: string }>,
+    onConversationUpdated: (callback: (event: unknown) => void): (() => void) => {
+      const listener = (_e: unknown, event: unknown) => callback(event)
+      ipcRenderer.on('agent:conversationUpdated', listener)
+      return () => ipcRenderer.removeListener('agent:conversationUpdated', listener)
+    },
     onChunk: (runId: string, callback: (chunk: unknown) => void): (() => void) => {
       const listener = (_e: unknown, data: { runId: string; chunk: unknown }) => {
         if (data?.runId === runId) callback(data.chunk)
@@ -250,6 +259,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('persona:list') as Promise<{ success: boolean; personas?: unknown[]; error?: string }>,
     build: (payload: { sessionId: string; displayName?: string }) =>
       ipcRenderer.invoke('persona:build', payload) as Promise<{ success: boolean; persona?: unknown; error?: string }>,
+    // 克隆我自己（自画像）：用与克隆好友一致的 AI 管线，按 self: 前缀存储；供"像我"建议使用
+    buildSelf: (payload: { sessionId: string; displayName?: string }) =>
+      ipcRenderer.invoke('persona:buildSelf', payload) as Promise<{ success: boolean; persona?: unknown; error?: string }>,
     updateSpeakingStyle: (payload: { sessionId: string; card: unknown }) =>
       ipcRenderer.invoke('persona:updateSpeakingStyle', payload) as Promise<{ success: boolean; persona?: unknown; error?: string }>,
     cloneVoice: (payload: { sessionId: string; displayName?: string }) =>
@@ -489,6 +501,37 @@ contextBridge.exposeInMainWorld('electronAPI', {
     openVideoPlayerWindow: (videoPath: string, videoWidth?: number, videoHeight?: number) => ipcRenderer.invoke('window:openVideoPlayerWindow', videoPath, videoWidth, videoHeight),
     openBrowserWindow: (url: string, title?: string) => ipcRenderer.invoke('window:openBrowserWindow', url, title),
     openSkillPreviewWindow: (skillName: string) => ipcRenderer.invoke('window:openSkillPreviewWindow', skillName) as Promise<boolean>,
+    setReplyTileEnabled: (enabled: boolean) => ipcRenderer.invoke('window:setReplyTileEnabled', enabled) as Promise<boolean>,
+    getReplyTileEnabled: () => ipcRenderer.invoke('window:getReplyTileEnabled') as Promise<boolean>,
+    replyTileReady: () => ipcRenderer.send('window:replyTileReady'),
+    replyTileRefresh: () => ipcRenderer.send('window:replyTileRefresh'),
+    replyTile: {
+      push: (entry: { sessionId: string; sessionName: string; avatarUrl?: string; state: 'pending' | 'loading' | 'error' | 'ready' | 'gone'; suggestions?: string[]; batches?: Array<{ id: string; targetKey: string; quote: string; suggestions: string[] }>; pendingContinue?: boolean; error?: string }) =>
+        ipcRenderer.send('reply-tile:push', entry),
+      continue: (sessionId: string) => ipcRenderer.send('reply-tile:continue', sessionId),
+      skip: (sessionId: string) => ipcRenderer.send('reply-tile:skip', sessionId),
+      retry: (payload: { sessionId: string; batchId: string; suggestionIndex: number }) => ipcRenderer.send('reply-tile:retry', payload),
+      onUpdate: (callback: (entry: { sessionId: string; sessionName: string; avatarUrl?: string; state: 'pending' | 'loading' | 'error' | 'ready' | 'gone'; suggestions?: string[]; batches?: Array<{ id: string; targetKey: string; quote: string; suggestions: string[] }>; pendingContinue?: boolean; error?: string }) => void) => {
+        const listener = (_: unknown, entry: any) => callback(entry)
+        ipcRenderer.on('reply-tile:update', listener)
+        return () => ipcRenderer.removeListener('reply-tile:update', listener)
+      },
+      onContinue: (callback: (sessionId: string) => void) => {
+        const listener = (_: unknown, sessionId: string) => callback(sessionId)
+        ipcRenderer.on('reply-tile:continue', listener)
+        return () => ipcRenderer.removeListener('reply-tile:continue', listener)
+      },
+      onSkip: (callback: (sessionId: string) => void) => {
+        const listener = (_: unknown, sessionId: string) => callback(sessionId)
+        ipcRenderer.on('reply-tile:skip', listener)
+        return () => ipcRenderer.removeListener('reply-tile:skip', listener)
+      },
+      onRetry: (callback: (payload: { sessionId: string; batchId: string; suggestionIndex: number }) => void) => {
+        const listener = (_: unknown, payload: { sessionId: string; batchId: string; suggestionIndex: number }) => callback(payload)
+        ipcRenderer.on('reply-tile:retry', listener)
+        return () => ipcRenderer.removeListener('reply-tile:retry', listener)
+      }
+    },
     openChatHistoryWindow: (sessionId: string, messageId: number) => ipcRenderer.invoke('window:openChatHistoryWindow', sessionId, messageId),
     resizeToFitVideo: (videoWidth: number, videoHeight: number) => ipcRenderer.invoke('window:resizeToFitVideo', videoWidth, videoHeight),
     resizeContent: (width: number, height: number) => ipcRenderer.invoke('window:resizeContent', width, height),

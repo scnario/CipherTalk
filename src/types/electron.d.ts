@@ -30,6 +30,30 @@ export interface WebSearchConfig {
   maxResults: number
 }
 
+
+export type AgentConversationChangeType =
+  | 'created'
+  | 'messages-appended'
+  | 'messages-replaced'
+  | 'renamed'
+  | 'metadata-updated'
+  | 'deleted'
+
+export interface AgentConversationUpdatedEvent {
+  id: number
+  accountId?: string
+  scope?: unknown
+  title?: string
+  modelProvider?: string
+  modelId?: string
+  source?: string
+  externalId?: string | null
+  createdAt?: number
+  updatedAt?: number
+  changeType: AgentConversationChangeType
+  originClientId?: string | null
+}
+
 export type TtsProviderId = 'xiaomi' | 'volcengine' | 'aliyun-qwen'
 export type TtsProtocol = 'xiaomi-mimo-tts' | 'volcengine-bidirectional' | 'aliyun-qwen-realtime'
 
@@ -449,6 +473,20 @@ export interface ElectronAPI {
     resizeToFitVideo: (videoWidth: number, videoHeight: number) => Promise<void>
     openChatHistoryWindow: (sessionId: string, messageId: number) => Promise<boolean>
     onImageListUpdate: (callback: (data: { imageList: ImageListItem[], currentIndex: number }) => void) => () => void
+    setReplyTileEnabled: (enabled: boolean) => Promise<boolean>
+    getReplyTileEnabled: () => Promise<boolean>
+    replyTileReady: () => void
+    replyTileRefresh: () => void
+    replyTile: {
+      push: (entry: { sessionId: string; sessionName: string; avatarUrl?: string; state: 'pending' | 'loading' | 'error' | 'ready' | 'gone'; suggestions?: string[]; batches?: Array<{ id: string; targetKey: string; quote: string; suggestions: string[] }>; pendingContinue?: boolean; error?: string }) => void
+      continue: (sessionId: string) => void
+      skip: (sessionId: string) => void
+      retry: (payload: { sessionId: string; batchId: string; suggestionIndex: number }) => void
+      onUpdate: (callback: (entry: { sessionId: string; sessionName: string; avatarUrl?: string; state: 'pending' | 'loading' | 'error' | 'ready' | 'gone'; suggestions?: string[]; batches?: Array<{ id: string; targetKey: string; quote: string; suggestions: string[] }>; pendingContinue?: boolean; error?: string }) => void) => () => void
+      onContinue: (callback: (sessionId: string) => void) => () => void
+      onSkip: (callback: (sessionId: string) => void) => () => void
+      onRetry: (callback: (payload: { sessionId: string; batchId: string; suggestionIndex: number }) => void) => () => void
+    }
   }
   config: {
     get: (key: string) => Promise<unknown>
@@ -1348,16 +1386,48 @@ export interface ElectronAPI {
     ) => Promise<{ success: boolean; error?: string }>
     abort: (runId: string) => Promise<{ success: boolean }>
     generateTitle: (firstMessage: string, modelConfig?: unknown) => Promise<{ success: boolean; title?: string; error?: string }>
+    replySuggest: (
+      input: {
+        contactName: string
+        /** 会话 username：深度模式的历史检索、likeme 的真实问答对检索需要 */
+        sessionId?: string
+        context: Array<{ fromMe: boolean; text: string }>
+        style: string
+        count: number
+        /** 深度模式：子进程内跑带会话检索工具的小步 Agent 循环 */
+        deep?: boolean
+        myRecentTexts?: string[]
+        /** likeme 模式下由自画像画像卡渲染成的提示文本，优先于 myRecentTexts */
+        myPersonaContext?: string
+        /** 自画像统计（我平均一轮连发几条/每条字数），用于连发自适应 */
+        myStats?: { avgBurst?: number; avgChars?: number }
+        /** 深度模式时对方的画像提示文本（克隆过 TA 才有） */
+        friendPersonaContext?: string
+        /** 对方刚发来待回复的图片（base64，时间正序）；模型标记不支持图像输入时引擎侧忽略 */
+        images?: Array<{ base64: string }>
+      },
+      modelConfig?: unknown
+    ) => Promise<{
+      success: boolean
+      suggestions?: string[]
+      /** 实际附进模型请求的图片张数（0=没附） */
+      imagesAttached?: number
+      /** 模型图像输入能力：true/false=目录明确标记，undefined=目录查不到 */
+      visionSupport?: boolean
+      error?: string
+    }>
     onChunk: (runId: string, callback: (chunk: unknown) => void) => () => void
     onProgress: (runId: string, callback: (progress: unknown) => void) => () => void
     listConversations: (scope?: unknown) => Promise<{ success: boolean; conversations?: unknown[]; error?: string }>
     loadConversation: (id: number) => Promise<{ success: boolean; conversation?: unknown; error?: string }>
     createConversation: (payload: unknown) => Promise<{ success: boolean; conversation?: unknown; error?: string }>
-    deleteConversation: (id: number) => Promise<{ success: boolean; error?: string }>
+    deleteConversation: (idOrPayload: number | { id?: number; originClientId?: string | null }) => Promise<{ success: boolean; error?: string }>
     deleteConversationsByScope: (scope: unknown) => Promise<{ success: boolean; deleted?: number; error?: string }>
     renameConversation: (id: number, title: string) => Promise<{ success: boolean; conversation?: unknown; error?: string }>
-    saveConversationMessages: (payload: unknown) => Promise<{ success: boolean; conversation?: unknown; error?: string }>
+    saveConversationMessages: (payload: unknown) => Promise<{ success: boolean; conversation?: unknown; staleMerged?: boolean; error?: string }>
     getLastConversation: (scope?: unknown) => Promise<{ success: boolean; conversation?: unknown; error?: string }>
+    sendConversationReplyToWechat: (payload: { conversationId: number; messageId: string; bubbles: string[] }) => Promise<{ success: boolean; sent?: boolean; skipped?: boolean; error?: string }>
+    onConversationUpdated: (callback: (event: AgentConversationUpdatedEvent) => void) => () => void
   }
   agentWorkspace: {
     selectWorkspace: () => Promise<{ success: boolean; canceled?: boolean; state?: CodeWorkspaceState; error?: string }>
@@ -1375,6 +1445,8 @@ export interface ElectronAPI {
     get: (sessionId: string) => Promise<{ success: boolean; persona?: PersonaRecordInfo | null; error?: string }>
     list: () => Promise<{ success: boolean; personas?: PersonaRecordInfo[]; error?: string }>
     build: (payload: { sessionId: string; displayName?: string }) => Promise<{ success: boolean; persona?: PersonaRecordInfo; error?: string }>
+    /** 克隆我自己：用与克隆好友一致的 AI 管线提炼"我"对此联系人的说话风格自画像，按 self: 前缀存储 */
+    buildSelf: (payload: { sessionId: string; displayName?: string }) => Promise<{ success: boolean; persona?: PersonaRecordInfo; error?: string }>
     updateSpeakingStyle: (payload: { sessionId: string; card: Partial<PersonaCardInfo> }) => Promise<{ success: boolean; persona?: PersonaRecordInfo; error?: string }>
     cloneVoice: (payload: { sessionId: string; displayName?: string }) => Promise<{ success: boolean; persona?: PersonaRecordInfo; voice?: PersonaTtsVoiceBindingInfo; warning?: string; error?: string }>
     exportVoiceSample: (payload: { sessionId: string; displayName?: string; outputPath: string }) => Promise<{ success: boolean; outputPath?: string; sampleCount?: number; sampleSeconds?: number; audioBytes?: number; error?: string }>

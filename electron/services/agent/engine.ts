@@ -2,7 +2,8 @@
  * 编排引擎 —— 用 AI SDK 的 ToolLoopAgent 跑 ReAct 循环，流式产出 UIMessageChunk。
  * 运行在 AI utilityProcess 子进程内（见文档 §3.1/§5.2）。
  */
-import { generateText, smoothStream, ToolLoopAgent, stepCountIs, type ModelMessage, type UIMessageChunk } from 'ai'
+import { generateText, smoothStream, tool, ToolLoopAgent, stepCountIs, type ModelMessage, type UIMessageChunk } from 'ai'
+import { z } from 'zod'
 import type { SystemModelMessage } from '@ai-sdk/provider-utils'
 import { createLanguageModel } from './provider'
 import { buildAgentPromptParts, CODE_WORKSPACE_PROMPT, IMAGE_GEN_PROMPT, PLAN_MODE_PROMPT, WEB_SEARCH_PROMPT } from './prompts'
@@ -17,11 +18,15 @@ import { loopGuardCondition, withToolTimeouts } from './guards'
 import { reportAgentProgress, withAgentProgress } from './progress'
 import { getCachedStartupMemory, warmStartupMemory } from './runtimeCache'
 import { buildToolRuntimeContext } from './toolPolicy'
+import { currentModelVisionSupport } from './tools/mediaHistory'
+import { detectImageMime } from '../media/mediaResolver'
 import { formatAgentError } from './errorFormat'
-import type { AgentProgressReporter, AgentProviderConfig, AgentRunInput } from './types'
+import type { AgentMcpToolDescriptor, AgentProgressReporter, AgentProviderConfig, AgentRunInput, AgentSkillContextItem, AgentToolProfile } from './types'
+import type { CodeWorkspaceRef } from './codeWorkspaceTypes'
 
 const MAX_STEPS = 24
 const DEFAULT_AGENT_TEMPERATURE = 0.2
+const REPLY_DEEP_MAX_STEPS = 10
 
 type SegmenterLike = {
   segment(input: string): Iterable<unknown>
@@ -375,3 +380,263 @@ function sanitizeGeneratedTitle(value: string): string {
     .trim()
   return title.slice(0, 24) || '新对话'
 }
+
+export type ReplySuggestStyle = 'natural' | 'short' | 'formal' | 'humorous' | 'warm' | 'likeme'
+
+export type ReplySuggestInput = {
+  contactName: string
+  /** 会话 username；深度模式的历史检索工具、likeme 的真实问答对检索都需要它 */
+  sessionId?: string
+  /** 对话上下文，从旧到新；深度模式由渲染端多传消息实现 */
+  context: Array<{ fromMe: boolean; text: string }>
+  style: ReplySuggestStyle
+  count: number
+  /** 深度模式：给模型一个会话内检索工具跑小步工具循环，先查历史背景再给建议 */
+  deep?: boolean
+  /** style === 'likeme' 时的"我"历史发言 few-shot（无自画像时的兜底） */
+  myRecentTexts?: string[]
+  /** style === 'likeme' 时由自画像画像卡渲染成的提示文本；优先于 myRecentTexts */
+  myPersonaContext?: string
+  /** 自画像统计：avgBurst=我平均一轮连发几条，avgChars=每条平均字数；用于连发自适应 */
+  myStats?: { avgBurst?: number; avgChars?: number }
+  /** 深度模式时对方的画像（克隆过 TA 才有），拟回复时考虑 TA 吃哪套、避开雷区 */
+  friendPersonaContext?: string
+  /** 对方刚发来待回复的图片（base64，时间正序）；模型标记不支持图像输入时忽略 */
+  images?: Array<{ base64: string }>
+  /** Deep mode reuses the same Agent tool context as the main Agent run. */
+  mcpTools?: AgentMcpToolDescriptor[]
+  skills?: AgentSkillContextItem[]
+  toolProfile?: AgentToolProfile
+  codeWorkspace?: CodeWorkspaceRef | null
+  providerConfig: AgentProviderConfig
+}
+
+/** 单次回复建议最多附带的图片张数 */
+const SUGGEST_IMAGE_LIMIT = 3
+
+export type ReplySuggestOutcome = {
+  suggestions: string[]
+  /** 实际附进请求的图片张数（0=没附：没传图/模型明确不支持视觉/全部解码失败） */
+  imagesAttached: number
+  /** 模型图像输入能力：true/false=目录明确标记，undefined=目录查不到（按可尝试处理） */
+  visionSupport: boolean | undefined
+}
+
+/** 我平均一轮连发达到该值就提示模型按连发习惯拆条（用"／"分隔） */
+const BURST_HINT_THRESHOLD = 1.5
+
+const REPLY_STYLE_HINTS: Record<ReplySuggestStyle, string> = {
+  natural: '自然日常，像平时和朋友聊天',
+  short: '简短干脆，尽量一句话说完',
+  formal: '得体正式，措辞礼貌',
+  humorous: '幽默轻松，可以适度玩梗',
+  warm: '热情贴心，多给情绪价值',
+  likeme: '严格模仿"我"的说话语气、用词、口头禅和标点习惯',
+}
+
+export async function generateReplySuggestions(
+  input: ReplySuggestInput,
+  signal?: AbortSignal,
+): Promise<ReplySuggestOutcome> {
+  const count = Math.min(5, Math.max(1, Math.round(input.count) || 3))
+  const contactName = input.contactName.trim() || '对方'
+  const visionSupport = currentModelVisionSupport(input.providerConfig)
+  const cleanedContext = input.context
+    .map((m) => ({ ...m, text: m.text.trim() }))
+    .filter((m) => m.text)
+  const lines = cleanedContext
+    .map((m) => `${m.fromMe ? 'Me (app user; reply sender)' : `${contactName} (other person; reply recipient)`}: ${m.text.slice(0, 300)}`)
+  if (lines.length === 0) return { suggestions: [], imagesAttached: 0, visionSupport }
+  const latestIncoming = [...cleanedContext].reverse().find((m) => !m.fromMe)
+  const latestIncomingHint = latestIncoming
+    ? `Target incoming message to reply to: ${contactName} just sent me: "${latestIncoming.text.slice(0, 300)}". `
+    : ''
+
+  const sessionId = input.sessionId?.trim()
+  const fewShotParts: string[] = []
+  if (input.style === 'likeme') {
+    if (input.myPersonaContext) {
+      fewShotParts.push(`"我"的说话画像（严格遵循其中的语气、口头禅、标点习惯来生成回复）：\n${input.myPersonaContext}`)
+    } else if (input.myRecentTexts?.length) {
+      fewShotParts.push(`"我"的历史发言示例（模仿这种语气）：\n${input.myRecentTexts.slice(0, 20).map((t) => `- ${t.trim().slice(0, 100)}`).join('\n')}`)
+    }
+    // 检索式 few-shot：拿"我"过去遇到类似话时的真实回复，比画像卡里的静态样本更贴当前话题（与克隆好友聊天同一招）
+    const lastIncoming = [...input.context].reverse().find((m) => !m.fromMe)?.text.trim()
+    if (sessionId && lastIncoming) {
+      try {
+        const { personaPairStore } = await import('./persona/personaPairStore')
+        const hits = await personaPairStore.search(`self:${sessionId}`, lastIncoming, 6)
+        if (hits.length > 0) {
+          fewShotParts.push(
+            `"我"过去遇到类似话时的真实回复（最优先参考，回复要像这些一样）：\n${hits
+              .map((h) => `- 对方：${h.user}\n  我：${h.replies.join('／')}`)
+              .join('\n')}`,
+          )
+        }
+      } catch {
+        // 检索失败静默，退回画像卡/历史发言
+      }
+    }
+  }
+  const fewShot = fewShotParts.length > 0 ? `\n\n${fewShotParts.join('\n\n')}` : ''
+
+  const deep = input.deep === true && !!sessionId
+  // 连发自适应：我真人习惯连发短句时，让每条建议按习惯拆成短句连发（正式风格不拆）
+  const avgBurst = input.myStats?.avgBurst ?? 0
+  const burstHint = avgBurst >= BURST_HINT_THRESHOLD && input.style !== 'formal'
+    ? `"我"平时习惯把一句话拆成短句连发（平均一轮 ${Math.round(avgBurst * 10) / 10} 条${input.myStats?.avgChars ? `、每条约 ${input.myStats.avgChars} 字` : ''}）：每条建议照这个习惯拆成 2~3 条短句，短句之间用"／"分隔；内容本来就短的保持一条即可。`
+    : ''
+  const system = `You are a WeChat reply-suggestion assistant. Direction is critical: "me" = the app user who will send the reply; ${contactName} = the other person who will receive the reply. Generate exactly ${count} reply suggestions that I can directly send to ${contactName}. ${latestIncomingHint}Every output string must be the exact words I would send to ${contactName}; never answer from ${contactName}'s perspective, never write what ${contactName} should say to me, and never output analysis or summaries. Requirements: colloquial Chinese; respond tightly to the latest incoming message from ${contactName}; make the ${count} suggestions distinct in angle or tone; no explanations, no numbering, no speaker prefix. Style: ${REPLY_STYLE_HINTS[input.style] ?? REPLY_STYLE_HINTS.natural}. ${burstHint}${deep ? 'You may use search_history to inspect my history with the other person and recover background for the target incoming message; search two or three times at most.' : ''}Final output must be only a JSON string array with exactly ${count} strings, e.g. ["reply one","reply two"]. Do not put multiple suggestions inside one string and do not output anything else.`
+  const friendBlock = deep && input.friendPersonaContext
+    ? `\n\n对方「${contactName}」的画像（拟回复时考虑 TA 吃哪套、避开雷区）：\n${input.friendPersonaContext}`
+    : ''
+
+  // 多模态：把对方刚发来的图片附进请求。仅当模型被明确标记"不支持图像输入"时丢弃；
+  // 目录里查不到（undefined）按可尝试处理，与 inspect_media_image 工具口径一致。
+  const imageParts: Array<{ type: 'image'; image: Buffer; mediaType: string }> = []
+  if (input.images?.length && visionSupport !== false) {
+    for (const img of input.images.slice(0, SUGGEST_IMAGE_LIMIT)) {
+      try {
+        const buffer = Buffer.from(img.base64, 'base64')
+        const mediaType = buffer.length > 0 ? detectImageMime(buffer) : null
+        if (mediaType) imageParts.push({ type: 'image', image: buffer, mediaType })
+      } catch {
+        // 单张解码失败跳过
+      }
+    }
+  }
+  const imageNote = imageParts.length > 0
+    ? `\n\n（对方最近发来的 ${imageParts.length} 张图片已按时间顺序附在本条消息里，回复建议要针对图片内容）`
+    : ''
+
+  const prompt = `Conversation history (oldest to newest):\n${lines.join('\n')}${friendBlock}${fewShot}${imageNote}\n\nCurrent task: write from Me/app-user's perspective, replying to the target incoming message from ${contactName}. Each suggestion must be text I can copy into WeChat and send to ${contactName}. Give ${count} reply suggestions.`
+  const messages: ModelMessage[] = [{
+    role: 'user',
+    content: imageParts.length > 0 ? [{ type: 'text', text: prompt }, ...imageParts] : prompt,
+  }]
+
+  const resultText = deep
+    ? await generateDeepReplySuggestionText({ input, system, messages, prompt, contactName, sessionId, signal })
+    : (await generateText({
+        model: createLanguageModel(input.providerConfig),
+        system,
+        messages,
+        // Keep the likeme style a little more lively, matching persona chat.
+        ...(input.style === 'likeme' ? { temperature: 0.8 } : {}),
+        abortSignal: signal,
+      })).text
+
+  return {
+    suggestions: parseReplySuggestions(resultText, count),
+    imagesAttached: imageParts.length,
+    visionSupport,
+  }
+}
+
+type DeepReplySuggestionArgs = {
+  input: ReplySuggestInput
+  system: string
+  messages: ModelMessage[]
+  prompt: string
+  contactName: string
+  sessionId: string
+  signal?: AbortSignal
+}
+
+async function generateDeepReplySuggestionText({ input, system, messages, prompt, contactName, sessionId, signal }: DeepReplySuggestionArgs): Promise<string> {
+  const scope = { kind: 'global' as const }
+  const webSearchOn = isWebSearchAvailable()
+  const imageGenOn = isImageGenAvailable()
+  const agentInput: AgentRunInput = {
+    messages,
+    providerConfig: input.providerConfig,
+    scope,
+    mcpTools: input.mcpTools,
+    skills: input.skills,
+    toolProfile: input.toolProfile ?? 'hybrid',
+    codeWorkspace: input.codeWorkspace ?? null,
+  }
+  const tools = withToolTimeouts({
+    ...buildTools(scope, input.providerConfig, input.mcpTools, webSearchOn, imageGenOn, input.codeWorkspace ?? null, {
+      uploadedMediaContext: undefined,
+    }),
+    search_history: tool({
+      description: `Search the current reply session history with ${contactName}. If the clue may live in other conversations, use global Agent tools such as search_messages or semantic_search instead.`,
+      inputSchema: z.object({
+        query: z.string().describe('Keyword or phrase'),
+      }),
+      execute: async ({ query }) => {
+        const { searchChat } = await import('./tools/shared')
+        const { hits } = await searchChat({ query, sessionId, limit: 8 })
+        return hits.length > 0
+          ? hits.map((h) => `${h.time} ${h.sender}: ${h.excerpt}`).join('\n')
+          : 'No hits'
+      },
+    }),
+  })
+  const cachedMemoryContext = getCachedStartupMemory(scope)
+  const memoryContext = cachedMemoryContext ?? ''
+  if (cachedMemoryContext === null) {
+    warmStartupMemory(scope, () => buildMemoryContext(scope))
+  }
+  const relevantMemoryContext = await preloadRelevantMemories(prompt, scope)
+  const prepared = buildAgentInstructions(agentInput, memoryContext, relevantMemoryContext, tools, webSearchOn, imageGenOn)
+  const instructions: SystemModelMessage[] = [
+    ...prepared.instructions,
+    {
+      role: 'system',
+      content: `${system}
+Deep reply-suggestion mode is connected to the full Agent toolset. You may search across conversations, read chat context, inspect contacts/groups/timeline, use memory, MCP, web search, and media search to recover background. Current target sessionId=${sessionId}; contact=${contactName}. Keep the direction fixed after all tool use: final suggestions are messages from \"me\" (the app user) to ${contactName}; never answer as ${contactName}, never write what ${contactName} should say to me, and never output analysis. If the latest message references another person, conversation, or historical event, proactively use global retrieval tools so multiple tile sessions can share context. For this task, only retrieve and analyze: do not actually send messages/media/files, modify files/tasks, or write long-term memory. The final answer must still be only a JSON string array.`,
+    },
+  ]
+  const agent = new ToolLoopAgent({
+    model: createLanguageModel(input.providerConfig),
+    instructions,
+    tools: prepared.tools,
+    temperature: input.style === 'likeme' ? 0.8 : DEFAULT_AGENT_TEMPERATURE,
+    stopWhen: [stepCountIs(REPLY_DEEP_MAX_STEPS), loopGuardCondition()],
+    providerOptions: buildProviderOptions(agentInput, prepared.promptCacheKey),
+    prepareStep: async ({ steps }) => ({
+      experimental_context: buildToolRuntimeContext(steps),
+    }),
+  })
+  const result = await agent.generate({ messages, abortSignal: signal })
+  return result.text
+}
+
+function splitReplySuggestionLines(text: string): string[] {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line
+      .replace(/^[\s\-*\u2022\u00b7\d.\u3001)\uff09'"\u201c\u201d]+/, '')
+      .replace(/['"\u201c\u201d]+$/, '')
+      .trim())
+    .filter(Boolean)
+}
+
+function parseReplySuggestions(text: string, count: number): string[] {
+  const start = text.indexOf('[')
+  const end = text.lastIndexOf(']')
+  if (start >= 0 && end > start) {
+    try {
+      const parsed: unknown = JSON.parse(text.slice(start, end + 1))
+      if (Array.isArray(parsed)) {
+        const items = parsed.map((v) => String(v).trim()).filter(Boolean)
+        // Some models return a valid JSON array with a single string that contains
+        // several numbered/newline-separated suggestions. Expand that shape so the
+        // tile can still show the configured count instead of one oversized card.
+        if (items.length === 1 && count > 1) {
+          const expanded = splitReplySuggestionLines(items[0])
+          if (expanded.length > 1) return expanded.slice(0, count)
+        }
+        if (items.length > 0) return items.slice(0, count)
+      }
+    } catch {
+      // Fall back to line parsing.
+    }
+  }
+  // Fallback: if the model ignores the JSON instruction, parse one suggestion per line.
+  return splitReplySuggestionLines(text).slice(0, count)
+}
+
+
