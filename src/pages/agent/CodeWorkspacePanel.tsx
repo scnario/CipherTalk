@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from 'react'
 import { AlertDialog, Button as HeroButton, Label, Popover, Tabs } from '@heroui/react'
 import { ArrowsRotateLeft, ArrowUpRightFromSquare, ChevronRight, Code, Display, File, Folder, FolderOpen, ShieldExclamation, Square, Terminal, Xmark } from '@gravity-ui/icons'
-import type { CodeWorkspaceApprovalRequest, CodeWorkspaceFileItem, CodeWorkspaceState } from '@/types/electron'
+import type {
+  CodeWorkspaceApprovalRequest,
+  CodeWorkspaceFileItem,
+  CodeWorkspaceRef,
+  CodeWorkspaceState,
+} from '@/types/electron'
 
 export const CODE_WORKSPACE_FILE_REF_MIME = 'application/x-ciphertalk-code-workspace-file'
 
@@ -13,7 +18,9 @@ export type CodeWorkspaceFileDragReference = {
 type CodeWorkspacePanelProps = {
   approval: CodeWorkspaceApprovalRequest | null
   className?: string
+  expanded: boolean
   onApprove: (requestId: string) => void
+  onExpandedChange: (expanded: boolean) => void
   onReject: (requestId: string) => void
   onSelect: () => void
   onStopDevServer: () => void
@@ -43,10 +50,14 @@ function basename(value: string): string {
   return parts[parts.length - 1] || value
 }
 
-function riskText(risk: CodeWorkspaceApprovalRequest['risk']): string {
+export function riskText(risk: CodeWorkspaceApprovalRequest['risk']): string {
   if (risk === 'high') return '高风险'
   if (risk === 'medium') return '中风险'
   return '低风险'
+}
+
+export function describeCodeWorkspaceApproval(approval: CodeWorkspaceApprovalRequest): string {
+  return `${kindText(approval.kind)} · ${approval.summary}`
 }
 
 function kindText(kind: CodeWorkspaceApprovalRequest['kind']): string {
@@ -344,7 +355,7 @@ function WorkspacePanelContent({
     <Tabs
       className="flex h-[min(72vh,44rem)] w-[min(calc(100vw-2rem),52rem)] min-h-0 flex-col overflow-hidden"
       selectedKey={activeTab}
-      onSelectionChange={(key) => setActiveTab(key as 'preview' | 'logs')}
+      onSelectionChange={(key) => setActiveTab(key as CodeWorkspacePanelTab)}
     >
       <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border/70 px-3 py-2">
         <div className="min-w-0">
@@ -466,7 +477,9 @@ export function CodeWorkspacePanelPopover(props: CodeWorkspacePanelPopoverProps)
 export function CodeWorkspacePanel({
   approval,
   className,
+  expanded,
   onApprove,
+  onExpandedChange,
   onReject,
   state,
 }: CodeWorkspacePanelProps) {
@@ -500,7 +513,7 @@ export function CodeWorkspacePanel({
         </div>
       </div>
 
-      <AlertDialog.Backdrop isOpen={approval !== null}>
+      <AlertDialog.Backdrop isOpen={approval !== null && expanded} onOpenChange={onExpandedChange}>
         <AlertDialog.Container>
           <AlertDialog.Dialog className="sm:max-w-3xl">
             <AlertDialog.Header>

@@ -21,9 +21,11 @@ export interface AgentProviderConfig {
   proxyUrl?: string
   /** 模型上下文窗口（token 数，来自 catalog limits.context）；用于 >90% 自动压缩的分母。未知则引擎用默认值。 */
   contextWindow?: number
+  /** Anthropic prompt cache 断点 TTL（config key anthropicCacheTtl），默认 5m；1h 档写入计价 2×。 */
+  anthropicCacheTtl?: '5m' | '1h'
 }
 
-export type AgentReasoningEffort = 'auto' | 'minimal' | 'low' | 'medium' | 'high'
+export type AgentReasoningEffort = 'auto' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
 
 export interface AgentProviderConfigOverride {
   provider?: string
@@ -91,6 +93,39 @@ export interface AgentProgressEvent {
 
 export type AgentProgressReporter = (event: AgentProgressEvent) => void
 
+export interface AgentTraceStep {
+  stepNumber: number
+  callId?: string
+  provider?: string
+  modelId?: string
+  finishReason?: string
+  usage?: unknown
+  elapsedMs?: number
+  responseMs?: number
+  timeToFirstOutputMs?: number
+  outputTokensPerSecond?: number
+  effectiveOutputTokensPerSecond?: number
+}
+
+export interface AgentTraceTool {
+  toolCallId: string
+  toolName: string
+  elapsedMs: number
+  error?: string
+}
+
+export interface AgentTraceMetadata {
+  startedAt: number
+  finishedAt?: number
+  totalElapsedMs?: number
+  firstStreamEventMs?: number
+  firstOutputMs?: number
+  stepCount: number
+  toolCount: number
+  steps: AgentTraceStep[]
+  tools: AgentTraceTool[]
+}
+
 /** 一次 agent 运行的输入。 */
 export interface AgentRunInput {
   messages: ModelMessage[]
@@ -114,6 +149,8 @@ export interface AgentRunInput {
   toolProfile?: AgentToolProfile
   /** 用户选择的代码工作区；真正的文件/命令操作仍由主进程 CodeWorkspaceService 代理并审批。 */
   codeWorkspace?: CodeWorkspaceRef | null
+  /** DeepSeek 这类前缀 KV cache provider：本轮动态上下文已作为隐藏 system 历史消息插入。 */
+  turnContextMode?: 'tail' | 'history'
 }
 
 export interface AgentUploadedMediaItem {

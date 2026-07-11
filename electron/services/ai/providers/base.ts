@@ -1,9 +1,10 @@
 import { generateText, jsonSchema, streamText, tool, type LanguageModel, type ModelMessage, type ToolSet } from 'ai'
 import { createAnthropic } from '@ai-sdk/anthropic'
-import { createGoogleGenerativeAI } from '@ai-sdk/google'
+import { createGoogle } from '@ai-sdk/google'
 import { createOpenAI } from '@ai-sdk/openai'
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
 import { createProxyFetch, getResolvedProxyUrl } from '../proxyFetch'
+import { withOpenAIResponsesSanitizer } from '../openaiResponsesSanitizer'
 
 export namespace OpenAI {
   export namespace Chat {
@@ -391,7 +392,7 @@ export abstract class BaseAIProvider implements AIProvider {
       })(model as any)
     }
     if (this.providerKind === 'google') {
-      return createGoogleGenerativeAI({
+      return createGoogle({
         apiKey: this.apiKey,
         baseURL: this.baseURL || undefined,
         name: this.name,
@@ -405,7 +406,7 @@ export abstract class BaseAIProvider implements AIProvider {
         baseURL: this.baseURL || undefined,
         name: this.name,
         headers,
-        fetch
+        fetch: withOpenAIResponsesSanitizer(fetch)
       }).responses(model as any)
     }
 
@@ -549,7 +550,8 @@ export abstract class BaseAIProvider implements AIProvider {
           temperature,
           maxOutputTokens: options?.maxTokens,
           timeout: 300000,
-          maxRetries: 0
+          maxRetries: 0,
+          telemetry: { functionId: 'provider-chat' }
         })
         return response.text || ''
       } catch (error) {
@@ -586,7 +588,8 @@ export abstract class BaseAIProvider implements AIProvider {
           timeout: 300000,
           maxRetries: 0,
           tools: toAiToolSet(options.tools),
-          toolChoice: toAiToolChoice(options.toolChoice)
+          toolChoice: toAiToolChoice(options.toolChoice),
+          telemetry: { functionId: 'provider-chat-tools' }
         } as any)
 
         const toolCalls = (response.toolCalls || []).map(toOpenAIToolCall)
@@ -635,7 +638,8 @@ export abstract class BaseAIProvider implements AIProvider {
           timeout: 300000,
           maxRetries: 0,
           tools: toAiToolSet(options.tools),
-          toolChoice: toAiToolChoice(options.toolChoice)
+          toolChoice: toAiToolChoice(options.toolChoice),
+          telemetry: { functionId: 'provider-stream-chat-tools' }
         } as any)
 
         let content = ''
@@ -645,7 +649,7 @@ export abstract class BaseAIProvider implements AIProvider {
         const toolInputById = new Map<string, string>()
         const toolNameById = new Map<string, string>()
 
-        for await (const part of result.fullStream) {
+        for await (const part of result.stream) {
           if (part.type === 'text-delta') {
             emitted = true
             content += part.text
@@ -738,14 +742,15 @@ export abstract class BaseAIProvider implements AIProvider {
           temperature,
           maxOutputTokens: options?.maxTokens,
           timeout: 300000,
-          maxRetries: 0
+          maxRetries: 0,
+          telemetry: { functionId: 'provider-stream-chat' }
         })
 
         let contentText = ''
         let reasoningText = ''
         let finishReason: string | null = null
 
-        for await (const part of result.fullStream) {
+        for await (const part of result.stream) {
           if (part.type === 'text-delta') {
             emitted = true
             contentText += part.text

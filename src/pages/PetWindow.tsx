@@ -1,11 +1,10 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { CircleDashed, PaperPlane, Xmark } from '@gravity-ui/icons'
 import { useCurrentPetLoader } from '@/features/pets/PetContext'
 import { PetSprite } from '@/features/pets/PetSprite'
 import { PET_STATES, petStateForAgent, type PetAgentState, type PetStateId } from '@/features/pets/petStates'
 import { DEFAULT_FLAIR_POOL, useIdleFlair } from '@/features/pets/useIdleFlair'
 import { speakText } from '@/lib/ttsPlayer'
-import { createLiquidGlassMap, type GlassFilterMap } from '@/utils/liquidGlass'
 
 type NotifyPayload = {
   username: string
@@ -51,9 +50,11 @@ const DEFAULT_BUBBLE_FRAME: BubbleFrame = {
 
 type PointerDownInfo = {
   pointerId: number
-  x: number
-  y: number
+  // 屏幕坐标：拖拽期间窗口在动，client 坐标会漂移，位移必须按 screen 坐标算
+  screenX: number
+  screenY: number
   at: number
+  dragging: boolean
 }
 
 function randomRunId(): string {
@@ -157,7 +158,6 @@ export default function PetWindow() {
   const [chatError, setChatError] = useState('')
   const [chatBusy, setChatBusy] = useState(false)
   const [personaBinding, setPersonaBinding] = useState<{ sessionId: string; name: string } | null>(null)
-  const [glassFilterMap, setGlassFilterMap] = useState<GlassFilterMap | null>(null)
 
   const queueRef = useRef<BubbleItem[]>([])
   const showingRef = useRef(false)
@@ -167,7 +167,6 @@ export default function PetWindow() {
   const notifyActionTimerRef = useRef(0)
   const progressTimerRef = useRef(0)
   const pointerDownRef = useRef<PointerDownInfo | null>(null)
-  const noticeLayerRef = useRef<HTMLDivElement>(null)
   const ttsEnabledRef = useRef(false)
   const speakSeqRef = useRef(0)
   const chatMessagesRef = useRef<ChatUiMessage[]>([])
@@ -211,31 +210,40 @@ export default function PetWindow() {
     }, PET_STATES[NOTIFY_ACTION].durationMs * 2)
   }, [])
 
+  // 手动拖拽 + 点击判定：app-region: drag 会吞掉左键 DOM 事件（点击永远不触发），
+  // 改为宠物区域 no-drag，按下后位移超过阈值走 IPC 移窗，否则按点击处理
   const handlePetPointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return
     if ((event.target as HTMLElement).closest('button')) return
     pointerDownRef.current = {
       pointerId: event.pointerId,
-      x: event.clientX,
-      y: event.clientY,
+      screenX: event.screenX,
+      screenY: event.screenY,
       at: performance.now(),
+      dragging: false,
     }
+    event.currentTarget.setPointerCapture(event.pointerId)
+    window.electronAPI.pet.dragStart()
   }, [])
 
   const handlePetPointerMove = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
     const down = pointerDownRef.current
     if (!down || down.pointerId !== event.pointerId) return
-    const distance = Math.hypot(event.clientX - down.x, event.clientY - down.y)
-    if (distance > SHORT_CLICK_MAX_DISTANCE) pointerDownRef.current = null
+    const dx = event.screenX - down.screenX
+    const dy = event.screenY - down.screenY
+    if (!down.dragging && Math.hypot(dx, dy) <= SHORT_CLICK_MAX_DISTANCE) return
+    down.dragging = true
+    window.electronAPI.pet.dragMove(dx, dy)
   }, [])
 
   const handlePetPointerUp = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
     const down = pointerDownRef.current
     pointerDownRef.current = null
     if (!down || down.pointerId !== event.pointerId) return
-    const elapsed = performance.now() - down.at
-    const distance = Math.hypot(event.clientX - down.x, event.clientY - down.y)
-    if (elapsed <= SHORT_CLICK_MAX_MS && distance <= SHORT_CLICK_MAX_DISTANCE) {
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    } catch { /* 已释放 */ }
+    if (!down.dragging && performance.now() - down.at <= SHORT_CLICK_MAX_MS) {
       triggerClickJump()
       setChatOpen((open) => !open)
     }
@@ -497,31 +505,6 @@ export default function PetWindow() {
   // 气泡区有内容（对话面板/气泡/进度行）时请求主进程扩窗，全空后还原
   const layerVisible = chatOpen || bubble !== null || progress !== null
 
-  useLayoutEffect(() => {
-    if (!layerVisible) {
-      setGlassFilterMap(null)
-      return
-    }
-
-    const layer = noticeLayerRef.current
-    if (!layer) return
-
-    const updateFilterMap = () => {
-      const notice = layer.querySelector<HTMLElement>('.pet-notice')
-      const target = notice ?? layer
-      const rect = target.getBoundingClientRect()
-      const next = createLiquidGlassMap(rect.width, rect.height)
-      if (next) setGlassFilterMap(next)
-    }
-
-    updateFilterMap()
-    const resizeObserver = new ResizeObserver(updateFilterMap)
-    resizeObserver.observe(layer)
-    const notice = layer.querySelector<HTMLElement>('.pet-notice')
-    if (notice) resizeObserver.observe(notice)
-    return () => resizeObserver.disconnect()
-  }, [layerVisible, bubble, chatOpen, progress])
-
   useEffect(() => {
     window.electronAPI.pet.setBubble(layerVisible)
   }, [layerVisible])
@@ -535,7 +518,7 @@ export default function PetWindow() {
     ?? (agentState === 'idle' && hoverFlair ? hoverFlair : agentState === 'idle' && flair ? flair : petStateForAgent(agentState))
 
   const petStageStyle: React.CSSProperties = {
-    WebkitAppRegion: 'drag',
+    WebkitAppRegion: 'no-drag',
     background: 'transparent',
     height: bubbleFrame.baseHeight,
     position: 'absolute',
@@ -583,34 +566,8 @@ export default function PetWindow() {
       onPointerLeave={clearHoverState}
       style={{ WebkitAppRegion: 'drag', background: 'transparent' } as React.CSSProperties}
     >
-      <svg className="pet-glass-filter-defs" aria-hidden="true" focusable="false">
-        <filter
-          id="pet-window-liquid-refraction"
-          filterUnits="userSpaceOnUse"
-          colorInterpolationFilters="sRGB"
-          x="0"
-          y="0"
-          width={glassFilterMap?.width || 1}
-          height={glassFilterMap?.height || 1}
-        >
-          <feImage
-            href={glassFilterMap?.href || ''}
-            xlinkHref={glassFilterMap?.href || ''}
-            width={glassFilterMap?.width || 1}
-            height={glassFilterMap?.height || 1}
-            result="displacementMap"
-          />
-          <feDisplacementMap
-            in="SourceGraphic"
-            in2="displacementMap"
-            scale={glassFilterMap?.scale || 0}
-            xChannelSelector="R"
-            yChannelSelector="G"
-          />
-        </filter>
-      </svg>
       {layerVisible && (
-        <div ref={noticeLayerRef} style={noticeLayerStyle}>
+        <div style={noticeLayerStyle}>
           {chatOpen ? (
             <div
               className="pet-notice mb-1 flex w-70 flex-col gap-1.5 rounded-2xl px-2.5 py-2 text-left"

@@ -73,7 +73,11 @@ export function warmStartupMemory(scope: AgentScope, loader: () => Promise<strin
   const key = scopeKey(scope)
   if (startupMemoryWarmups.has(key)) return
   const epoch = memoryCacheEpoch
-  const task = loader()
+  // buildMemoryContext does synchronous DB/Markdown reads before resolving; defer it away from the first-token path.
+  const task = new Promise<void>((resolve) => {
+    setTimeout(resolve, 5_000)
+  })
+    .then(loader)
     .then((content) => {
       if (epoch === memoryCacheEpoch) setEntry(startupMemoryCache, key, content || '')
     })

@@ -3,12 +3,20 @@
  * 可在 AI 子进程内调用。逻辑对齐 ai/providers/base.ts 的 getModelProvider()。
  */
 import { createAnthropic } from '@ai-sdk/anthropic'
-import { createGoogleGenerativeAI } from '@ai-sdk/google'
+import { createGoogle } from '@ai-sdk/google'
 import { createOpenAI } from '@ai-sdk/openai'
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
 import type { LanguageModel } from 'ai'
+import type { FilesV4 } from '@ai-sdk/provider'
 import { createProxyFetch } from '../ai/proxyFetch'
+import { withOpenAIResponsesSanitizer } from '../ai/openaiResponsesSanitizer'
+import { withGoogleExplicitCache } from './googleCacheFetch'
+import { isArkBaseURL, withArkContextCache } from './arkContextFetch'
 import type { AgentProviderConfig } from './types'
+
+export type AgentLanguageModelOptions = {
+  promptCacheKey?: string
+}
 
 /**
  * 部分第三方 Claude 代理（如 right.codes/claude-aws）会强制返回 thinking 块却漏掉 signature 字段，
@@ -51,7 +59,12 @@ function withAnthropicSanitizer(baseFetch: typeof globalThis.fetch | undefined):
   }) as typeof globalThis.fetch
 }
 
-export function createLanguageModel(config: AgentProviderConfig): LanguageModel {
+function injectOpenAICompatiblePromptCacheKey(args: Record<string, any>, promptCacheKey?: string): Record<string, any> {
+  if (!promptCacheKey || args.prompt_cache_key) return args
+  return { ...args, prompt_cache_key: promptCacheKey }
+}
+
+export function createLanguageModel(config: AgentProviderConfig, options: AgentLanguageModelOptions = {}): LanguageModel {
   const { providerKind, name, apiKey, baseURL, model, headers, proxyUrl } = config
   const fetch = createProxyFetch(proxyUrl)
 
@@ -59,11 +72,38 @@ export function createLanguageModel(config: AgentProviderConfig): LanguageModel 
     return createAnthropic({ apiKey, baseURL, name, headers, fetch: withAnthropicSanitizer(fetch) })(model as any)
   }
   if (providerKind === 'google') {
-    return createGoogleGenerativeAI({ apiKey, baseURL, name, headers, fetch })(model as any)
+    // 显式 cachedContent 缓存：fetch 层自动创建/复用，见 googleCacheFetch.ts
+    return createGoogle({ apiKey, baseURL, name, headers, fetch: withGoogleExplicitCache(fetch) })(model as any)
   }
   if (providerKind === 'openai-responses') {
-    return createOpenAI({ apiKey, baseURL, name, headers, fetch }).responses(model as any)
+    return createOpenAI({ apiKey, baseURL, name, headers, fetch: withOpenAIResponsesSanitizer(fetch) }).responses(model as any)
   }
 
-  return createOpenAICompatible({ name, apiKey, baseURL, headers, includeUsage: true, fetch }).chatModel(model)
+  return createOpenAICompatible({
+    name,
+    apiKey,
+    baseURL,
+    headers,
+    includeUsage: true,
+    // 火山方舟端点：system 前缀自动走 context 缓存，见 arkContextFetch.ts
+    fetch: isArkBaseURL(baseURL) ? withArkContextCache(fetch) : fetch,
+    transformRequestBody: (args) => injectOpenAICompatiblePromptCacheKey(args, options.promptCacheKey),
+  }).chatModel(model)
+}
+
+export function createProviderFilesApi(config: AgentProviderConfig): FilesV4 | null {
+  const { providerKind, name, apiKey, baseURL, headers, proxyUrl } = config
+  const fetch = createProxyFetch(proxyUrl)
+
+  if (providerKind === 'anthropic') {
+    return createAnthropic({ apiKey, baseURL, name, headers, fetch: withAnthropicSanitizer(fetch) }).files()
+  }
+  if (providerKind === 'google') {
+    return createGoogle({ apiKey, baseURL, name, headers, fetch }).files()
+  }
+  if (providerKind === 'openai-responses') {
+    return createOpenAI({ apiKey, baseURL, name, headers, fetch: withOpenAIResponsesSanitizer(fetch) }).files()
+  }
+
+  return null
 }

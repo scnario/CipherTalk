@@ -78,6 +78,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     toggleDesktopWindow: (enabled: boolean) => ipcRenderer.invoke('pet:toggleDesktopWindow', enabled) as Promise<{ success: boolean }>,
     setBubble: (expanded: boolean) => ipcRenderer.send('pet:setBubble', expanded),
     showContextMenu: () => ipcRenderer.send('pet:showContextMenu'),
+    dragStart: () => ipcRenderer.send('pet:dragStart'),
+    dragMove: (dx: number, dy: number) => ipcRenderer.send('pet:dragMove', dx, dy),
     onAgentState: (callback: (state: string) => void) => {
       const listener = (_: any, state: string) => callback(state)
       ipcRenderer.on('pet:agentState', listener)
@@ -201,8 +203,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('agent:deleteConversation', idOrPayload) as Promise<{ success: boolean; error?: string }>,
     deleteConversationsByScope: (scope: unknown) =>
       ipcRenderer.invoke('agent:deleteConversationsByScope', scope) as Promise<{ success: boolean; deleted?: number; error?: string }>,
-    renameConversation: (id: number, title: string) =>
-      ipcRenderer.invoke('agent:renameConversation', id, title) as Promise<{ success: boolean; conversation?: unknown; error?: string }>,
+    renameConversation: (id: number, title: string, originClientId?: string | null) =>
+      ipcRenderer.invoke('agent:renameConversation', id, title, originClientId) as Promise<{ success: boolean; conversation?: unknown; error?: string }>,
     saveConversationMessages: (payload: unknown) =>
       ipcRenderer.invoke('agent:saveConversationMessages', payload) as Promise<{ success: boolean; conversation?: unknown; staleMerged?: boolean; error?: string }>,
     getLastConversation: (scope?: unknown) =>
@@ -248,6 +250,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
       const listener = (_e: unknown, event: unknown) => callback(event)
       ipcRenderer.on('agentWorkspace:event', listener)
       return () => ipcRenderer.removeListener('agentWorkspace:event', listener)
+    },
+  },
+
+  localCodingAgent: {
+    getConfig: () => ipcRenderer.invoke('localCodingAgent:getConfig') as Promise<{ success: boolean; config?: unknown; error?: string }>,
+    setConfig: (config: unknown) => ipcRenderer.invoke('localCodingAgent:setConfig', config) as Promise<{ success: boolean; config?: unknown; error?: string }>,
+    detect: () => ipcRenderer.invoke('localCodingAgent:detect') as Promise<{ success: boolean; results?: unknown[]; error?: string }>,
+    run: (payload: unknown) => ipcRenderer.invoke('localCodingAgent:run', payload) as Promise<{ success: boolean; jobId?: string; error?: string }>,
+    cancel: (jobId: string) => ipcRenderer.invoke('localCodingAgent:cancel', jobId) as Promise<{ success: boolean; error?: string }>,
+    applyPatch: (jobId: string) => ipcRenderer.invoke('localCodingAgent:applyPatch', jobId) as Promise<{ success: boolean; changedPaths?: string[]; error?: string }>,
+    discardPatch: (jobId: string) => ipcRenderer.invoke('localCodingAgent:discardPatch', jobId) as Promise<{ success: boolean; changedPaths?: string[]; error?: string }>,
+    onEvent: (callback: (event: unknown) => void): (() => void) => {
+      const listener = (_e: unknown, event: unknown) => callback(event)
+      ipcRenderer.on('localCodingAgent:event', listener)
+      return () => ipcRenderer.removeListener('localCodingAgent:event', listener)
     },
   },
 
@@ -473,6 +490,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     maximize: () => ipcRenderer.send('window:maximize'),
     close: () => ipcRenderer.send('window:close'),
     openChatWindow: () => ipcRenderer.invoke('window:openChatWindow'),
+    focusMainWindow: (route?: string) => ipcRenderer.invoke('window:focusMainWindow', route),
     openMomentsWindow: (filterUsername?: string) => ipcRenderer.invoke('window:openMomentsWindow', filterUsername),
     openPersonaChatWindow: (sessionId: string) => ipcRenderer.invoke('window:openPersonaChatWindow', sessionId),
     openPosterStyleWindow: () => ipcRenderer.invoke('window:openPosterStyleWindow'),

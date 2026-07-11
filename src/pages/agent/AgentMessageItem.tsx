@@ -20,7 +20,6 @@ import {
   ChainOfThoughtStep,
 } from '@/components/ai-elements/chain-of-thought'
 import {
-  analyzeMessageRenderActivity,
   Message,
   MessageAttachment,
   MessageAttachments,
@@ -43,7 +42,6 @@ import {
   planRequiresDelegateAnalysis,
   pushBadge,
   renderChainLabel,
-  renderOutputActivitySteps,
   stripPlanControlMarkers,
   toolPartProgressKey,
   type AgentChainPart,
@@ -52,7 +50,7 @@ import {
 import { readSubAgentProgressFromMessage, type AgentMessageMetadata } from './agentConversationHelpers'
 import { messageTextOf, MessageUsageStats } from './AgentUsageStats'
 import { SubAgentProgressPanel } from './AgentSubAgentProgress'
-import { CompactionMarker, MessageChainOfThought, PlanCard, UserMessageActions, type CompactionPartData } from './AgentMessageBlocks'
+import { CompactionMarker, MessageChainOfThought, PlanCard, ToolIODetails, UserMessageActions, type CompactionPartData } from './AgentMessageBlocks'
 
 export type AgentImagePreviewPayload = {
   src: string
@@ -120,10 +118,6 @@ function AgentMessageItemImpl({
   )
   const assistantDisplayText = isPlanMessage ? stripPlanControlMarkers(assistantText) : assistantText
   const planNeedsDelegateAnalysis = isPlanMessage && planRequiresDelegateAnalysis(assistantText)
-  const outputActivity = message.role === 'assistant'
-    ? analyzeMessageRenderActivity(assistantDisplayText, assistantTextStreaming)
-    : null
-  const outputActivitySteps = outputActivity ? renderOutputActivitySteps(outputActivity, assistantTextStreaming) : []
   const userDisplay = message.role === 'user' ? getUserMessageDisplay(message.parts) : null
   const persistedSubAgentEvents = message.role === 'assistant' ? readSubAgentProgressFromMessage(message) : []
   const subAgentEventsForMessage = message.role === 'assistant'
@@ -198,9 +192,13 @@ function AgentMessageItemImpl({
               label={renderChainLabel('Reasoning', reasoningActive)}
               status={reasoningActive ? 'active' : 'complete'}
             >
-              <div className="whitespace-pre-wrap text-muted-foreground text-sm">
+              <MessageResponse
+                className="text-muted-foreground text-sm"
+                isStreaming={reasoningActive}
+                showStreamingIndicator={false}
+              >
                 {part.text}
-              </div>
+              </MessageResponse>
             </ChainOfThoughtStep>
           )
         }
@@ -249,6 +247,12 @@ function AgentMessageItemImpl({
             )}
             {toolName === 'delegate_analysis' && subAgentEventsForMessage.length > 0 && (
               <SubAgentProgressPanel events={subAgentEventsForMessage} tasks={delegateTasks} />
+            )}
+            {toolName !== 'delegate_analysis' && (
+              <ToolIODetails
+                input={part.input}
+                output={part.state === 'output-available' ? part.output : undefined}
+              />
             )}
           </ChainOfThoughtStep>
         )
@@ -319,21 +323,6 @@ function AgentMessageItemImpl({
             }
             return null
           })}
-          {outputActivitySteps.length > 0 && (
-            <MessageChainOfThought active={chainActive}>
-              {outputActivitySteps.map((step) => {
-                const Icon = step.icon
-                return (
-                  <ChainOfThoughtStep
-                    icon={Icon}
-                    key={`output-${step.key}`}
-                    label={renderChainLabel(step.active ? step.label : step.doneLabel, step.active)}
-                    status={step.active ? 'active' : 'complete'}
-                  />
-                )
-              })}
-            </MessageChainOfThought>
-          )}
           {assistantTextStreaming && <MessageStreamingIndicator />}
           {message.role === 'assistant' && (
             <MessageSources items={extractSources(message.parts)} nameOf={sessionNameOf} />
@@ -390,6 +379,11 @@ function AgentMessageItemImpl({
 }
 
 function propsAreEqual(prev: AgentMessageItemProps, next: AgentMessageItemProps): boolean {
+  // AI SDK 7 会高频替换最后一条 assistant 消息；这里宁可让在途/刚结束的最后一条多渲染一次，
+  // 也不能因为 memo 比较过紧把 text part 的可见更新挡住。
+  if (prev.isLastMessage || next.isLastMessage || prev.busy || next.busy || prev.status === 'streaming' || next.status === 'streaming') {
+    return false
+  }
   if (prev.message !== next.message) return false
   if (prev.messageIndex !== next.messageIndex) return false
   if (prev.isLastMessage !== next.isLastMessage) return false

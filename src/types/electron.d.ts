@@ -1,4 +1,9 @@
-import type { ChatSession, Message, Contact, ContactInfo } from './models'
+import type {
+  ChatSession,
+  Message,
+  Contact,
+  ContactInfo,
+} from './models'
 import type { AccountProfile, AccountProfileInput, AccountProfilePatch } from './account'
 import type { AIModelInfo, AIProviderInfo } from './ai'
 
@@ -174,6 +179,7 @@ export type CodeWorkspaceApprovalKind = 'write' | 'delete' | 'command' | 'dev-se
 export type CodeWorkspaceApprovalRisk = 'low' | 'medium' | 'high'
 export type CodeWorkspaceApprovalDecision = 'approved' | 'rejected'
 export type CodeWorkspaceApprovalPolicy = 'on-request' | 'risk-based' | 'full-access'
+export type AgentToolApprovalPolicy = 'on-request' | 'risk-based' | 'full-access'
 
 export interface CodeWorkspaceRef {
   id: string
@@ -263,6 +269,45 @@ export interface CodeWorkspaceEvent {
   decision?: CodeWorkspaceApprovalDecision
   changedPaths?: string[]
   at: number
+}
+
+export type LocalCodingAgentKind = 'codex' | 'claude-cli' | 'opencode' | 'custom'
+export type LocalCodingAgentRunMode = 'inspect' | 'propose' | 'direct'
+
+export interface LocalCodingAgentDefinition {
+  kind: LocalCodingAgentKind
+  name: string
+  executablePath: string
+  argsTemplate?: string[]
+  env?: Record<string, string>
+  timeoutMs: number
+  model?: string
+}
+
+export interface LocalCodingAgentConfig {
+  enabled: boolean
+  activeAgent: string
+  agents: Record<string, LocalCodingAgentDefinition>
+}
+
+export type LocalCodingAgentEvent =
+  | { type: 'started'; jobId: string; agentId: string; mode: LocalCodingAgentRunMode; cwd: string; at: number }
+  | { type: 'stdout'; jobId: string; text: string; at: number }
+  | { type: 'stderr'; jobId: string; text: string; at: number }
+  | { type: 'message'; jobId: string; role: 'assistant' | 'tool' | 'system'; text: string; at: number }
+  | { type: 'activity'; jobId: string; activity: 'reasoning' | 'tool'; toolName?: string; input?: unknown; output?: unknown; text?: string; at: number }
+  | { type: 'diff'; jobId: string; patch: string; changedPaths: string[]; at: number }
+  | { type: 'finished'; jobId: string; exitCode: number | null; durationMs: number; at: number }
+  | { type: 'error'; jobId: string; error: string; at: number }
+
+export interface LocalCodingAgentDetectResult {
+  id: string
+  kind: LocalCodingAgentKind
+  name: string
+  executablePath: string
+  found: boolean
+  version?: string
+  error?: string
 }
 
 export interface StatsPartialError {
@@ -449,6 +494,7 @@ export interface ElectronAPI {
     splashReady: () => void
     onSplashFadeOut?: (callback: () => void) => () => void
     openChatWindow: () => Promise<boolean>
+    focusMainWindow: (route?: string) => Promise<boolean>
     openMomentsWindow: (filterUsername?: string) => Promise<boolean>
     openPersonaChatWindow: (sessionId: string) => Promise<boolean>
     openPosterStyleWindow: () => Promise<boolean>
@@ -522,6 +568,8 @@ export interface ElectronAPI {
     toggleDesktopWindow: (enabled: boolean) => Promise<{ success: boolean }>
     setBubble: (expanded: boolean) => void
     showContextMenu: () => void
+    dragStart: () => void
+    dragMove: (dx: number, dy: number) => void
     onAgentState: (callback: (state: string) => void) => () => void
     onWindowMove: (callback: (x: number) => void) => () => void
     onBubbleFrame: (callback: (frame: { expanded: boolean; baseLeft: number; baseTop: number; baseWidth: number; baseHeight: number }) => void) => () => void
@@ -1423,7 +1471,7 @@ export interface ElectronAPI {
     createConversation: (payload: unknown) => Promise<{ success: boolean; conversation?: unknown; error?: string }>
     deleteConversation: (idOrPayload: number | { id?: number; originClientId?: string | null }) => Promise<{ success: boolean; error?: string }>
     deleteConversationsByScope: (scope: unknown) => Promise<{ success: boolean; deleted?: number; error?: string }>
-    renameConversation: (id: number, title: string) => Promise<{ success: boolean; conversation?: unknown; error?: string }>
+    renameConversation: (id: number, title: string, originClientId?: string | null) => Promise<{ success: boolean; conversation?: unknown; error?: string }>
     saveConversationMessages: (payload: unknown) => Promise<{ success: boolean; conversation?: unknown; staleMerged?: boolean; error?: string }>
     getLastConversation: (scope?: unknown) => Promise<{ success: boolean; conversation?: unknown; error?: string }>
     sendConversationReplyToWechat: (payload: { conversationId: number; messageId: string; bubbles: string[] }) => Promise<{ success: boolean; sent?: boolean; skipped?: boolean; error?: string }>
@@ -1440,6 +1488,16 @@ export interface ElectronAPI {
     reject: (requestId: string, reason?: string) => Promise<{ success: boolean; error?: string }>
     onApprovalRequest: (callback: (request: CodeWorkspaceApprovalRequest) => void) => () => void
     onWorkspaceEvent: (callback: (event: CodeWorkspaceEvent) => void) => () => void
+  }
+  localCodingAgent: {
+    getConfig: () => Promise<{ success: boolean; config?: LocalCodingAgentConfig; error?: string }>
+    setConfig: (config: LocalCodingAgentConfig) => Promise<{ success: boolean; config?: LocalCodingAgentConfig; error?: string }>
+    detect: () => Promise<{ success: boolean; results?: LocalCodingAgentDetectResult[]; error?: string }>
+    run: (payload: { agentId: string; mode: LocalCodingAgentRunMode; prompt: string; workspace: CodeWorkspaceRef; model?: string }) => Promise<{ success: boolean; jobId?: string; error?: string }>
+    cancel: (jobId: string) => Promise<{ success: boolean; error?: string }>
+    applyPatch: (jobId: string) => Promise<{ success: boolean; changedPaths?: string[]; error?: string }>
+    discardPatch: (jobId: string) => Promise<{ success: boolean; changedPaths?: string[]; error?: string }>
+    onEvent: (callback: (event: LocalCodingAgentEvent) => void) => () => void
   }
   persona: {
     get: (sessionId: string) => Promise<{ success: boolean; persona?: PersonaRecordInfo | null; error?: string }>

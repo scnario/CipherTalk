@@ -115,3 +115,4 @@ export interface AnalyticsData {
   messagesByHour: number[]
   messagesByDay: number[]
 }
+

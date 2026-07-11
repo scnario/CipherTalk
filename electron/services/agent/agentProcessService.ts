@@ -7,7 +7,7 @@ import { utilityProcess } from 'electron'
 import type { UtilityProcess } from 'electron'
 import { existsSync } from 'fs'
 import { join } from 'path'
-import type { UIMessageChunk } from 'ai'
+import type { ModelMessage, UIMessageChunk } from 'ai'
 import { getAppPath, isElectronPackaged } from '../runtimePaths'
 import { getElectronWorkerEnv } from '../workerEnvironment'
 import { codeWorkspaceService } from './codeWorkspaceService'
@@ -36,6 +36,29 @@ function errorToLogData(error: unknown): Record<string, unknown> {
     return { name: error.name, message: error.message, stack: error.stack }
   }
   return { message: String(error) }
+}
+
+function fileDataUrl(data: unknown): URL | null {
+  if (data instanceof URL) return data
+  if (!data || typeof data !== 'object') return null
+  const tagged = data as { type?: unknown; url?: unknown }
+  return tagged.type === 'url' && tagged.url instanceof URL ? tagged.url : null
+}
+
+/** URL 实例无法可靠穿过 utilityProcess；改用 AI SDK FilePart 支持的 URL 字符串简写。 */
+function serializeModelMessages(messages: ModelMessage[]): ModelMessage[] {
+  return messages.map((message) => {
+    if (message.role !== 'user' || !Array.isArray(message.content)) return message
+    let changed = false
+    const content = message.content.map((part) => {
+      if (part.type !== 'file') return part
+      const url = fileDataUrl(part.data)
+      if (!url) return part
+      changed = true
+      return { ...part, data: url.href }
+    })
+    return changed ? { ...message, content } : message
+  })
 }
 
 function truncateLogText(text: string, maxLength = 2000): string {
@@ -94,7 +117,11 @@ export class AgentProcessService {
       signal.addEventListener('abort', () => { void this.call('abort', { runId }).catch(() => undefined) })
     }
     try {
-      await this.call<{ done: boolean }>('run', { runId, ...input })
+      await this.call<{ done: boolean }>('run', {
+        runId,
+        ...input,
+        messages: serializeModelMessages(input.messages),
+      })
     } finally {
       this.chunkHandlers.delete(runId)
       this.progressHandlers.delete(runId)
@@ -150,7 +177,11 @@ export class AgentProcessService {
       signal.addEventListener('abort', () => { void this.call('abort', { runId }).catch(() => undefined) })
     }
     try {
-      await this.call<{ done: boolean }>('personaChat', { runId, ...input })
+      await this.call<{ done: boolean }>('personaChat', {
+        runId,
+        ...input,
+        messages: serializeModelMessages(input.messages),
+      })
     } finally {
       this.chunkHandlers.delete(runId)
       this.progressHandlers.delete(runId)
@@ -214,6 +245,7 @@ export class AgentProcessService {
 
       this.worker = worker
       let readyFired = false
+      let stderrTail = ''
       const rejectInitOnce = (err: Error) => {
         if (!readyFired) { readyFired = true; reject(err) }
       }
@@ -238,6 +270,7 @@ export class AgentProcessService {
       worker.stderr?.on('data', (chunk: Buffer) => {
         const text = filterUtilityStderr(chunk.toString().trim())
         if (text) {
+          stderrTail = `${stderrTail}\n${text}`.slice(-4000)
           console.error(`[aiAgentUtility:${worker.pid ?? 'unknown'}] ${text}`)
           this.logger?.warn('AIAgentProcess', 'AI Agent utility stderr', {
             pid: worker.pid ?? null,
@@ -332,7 +365,8 @@ export class AgentProcessService {
         if (this.worker === worker) this.worker = null
         this.initPromise = null
         this.rejectAllPending(`agent utility process exited (pid=${pid ?? 'unknown'}, code=${code})`)
-        rejectInitOnce(new Error(`AI agent utility process 启动后立即退出，code=${code}`))
+        const stderrDetail = stderrTail.trim() ? `，stderr=${stderrTail.trim()}` : ''
+        rejectInitOnce(new Error(`AI agent utility process 启动后立即退出，code=${code}${stderrDetail}`))
         if (!this.shuttingDown) {
           console.warn(`[agentProcessService] utility process 退出 pid=${pid ?? 'unknown'} code=${code}，${RESTART_DELAY_MS}ms 后自动重启`)
           this.logger?.warn('AIAgentProcess', 'AI Agent utility process 退出，准备自动重启', {

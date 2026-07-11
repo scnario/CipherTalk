@@ -1,14 +1,17 @@
 import { createHash } from 'crypto'
 import type { ProviderOptions, SystemModelMessage } from '@ai-sdk/provider-utils'
 import type { ToolSet } from 'ai'
+import { isArkBaseURL } from './arkContextFetch'
 import type { AgentReasoningEffort, AgentRunInput } from './types'
 
 export interface AgentPromptParts {
   cacheableSystem: string
   dynamicSystem: string
+  /** 每轮必变（当前时间、按问题挑选的技能等）；不进 instructions，由 engine 注入消息尾部以保住前缀缓存。 */
+  turnSystem: string
 }
 
-const ANTHROPIC_CACHE_CONTROL = { type: 'ephemeral', ttl: '5m' } as const
+export type AnthropicCacheTtl = '5m' | '1h'
 const MAX_ANTHROPIC_CACHE_BREAKPOINTS = 4
 
 const CACHEABLE_BUILTIN_TOOL_NAMES = new Set([
@@ -49,8 +52,20 @@ function hostFromUrl(url: string): string | null {
 
 function isOfficialOpenAIResponsesEndpoint(input: AgentRunInput): boolean {
   return input.providerConfig.providerKind === 'openai-responses' &&
-    input.providerConfig.name !== 'custom' &&
     hostFromUrl(input.providerConfig.baseURL) === 'api.openai.com'
+}
+
+function isDeepSeekProvider(input: AgentRunInput): boolean {
+  if (input.providerConfig.providerKind !== 'openai-compatible') return false
+  const text = [input.providerConfig.name, input.providerConfig.baseURL, input.providerConfig.model]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+  return text.includes('deepseek')
+}
+
+function supportsOpenAI24hPromptCache(model: string): boolean {
+  return /\b5\.1\b/.test(model.toLowerCase())
 }
 
 function shortHash(value: string): string {
@@ -77,8 +92,13 @@ function isReasoningEffortSet(effort?: AgentReasoningEffort): effort is Exclude<
   return Boolean(effort && effort !== 'auto')
 }
 
+export function buildReasoningOption(config: { reasoningEffort?: AgentReasoningEffort }): Exclude<AgentReasoningEffort, 'auto'> | undefined {
+  return isReasoningEffortSet(config.reasoningEffort) ? config.reasoningEffort : undefined
+}
+
 function toAnthropicEffort(effort: Exclude<AgentReasoningEffort, 'auto'>): 'low' | 'medium' | 'high' {
   if (effort === 'minimal') return 'low'
+  if (effort === 'xhigh') return 'high' // Anthropic 无 xhigh 档，封顶到 high
   return effort
 }
 
@@ -88,7 +108,8 @@ function toGoogleThinkingConfig(
 ): Record<string, unknown> | undefined {
   const normalizedModel = model.toLowerCase()
   if (normalizedModel.includes('gemini-3')) {
-    return { thinkingLevel: effort, includeThoughts: true }
+    // Gemini 3 的 thinkingLevel 只认 low/high，xhigh 封顶到 high
+    return { thinkingLevel: effort === 'xhigh' ? 'high' : effort, includeThoughts: true }
   }
   if (!normalizedModel.includes('gemini-2.5')) {
     return undefined
@@ -99,6 +120,7 @@ function toGoogleThinkingConfig(
     low: 2048,
     medium: 4096,
     high: 8192,
+    xhigh: 16384,
   }
   return { thinkingBudget: thinkingBudgetByEffort[effort], includeThoughts: true }
 }
@@ -111,8 +133,18 @@ export function buildProviderOptions(input: AgentRunInput, promptCacheKey: strin
     const option: Record<string, unknown> = {}
     if (isReasoningEffortSet(effort)) option.reasoningEffort = effort
     if (input.providerConfig.providerKind === 'openai-responses') {
+      // 让 OpenAI 返回思考摘要（推理模型才有内容，非推理模型会被忽略）；下游 engine 已透传 reasoning 块
+      option.reasoningSummary = 'auto'
       option.store = isOfficialOpenAIResponsesEndpoint(input)
-      if (option.store) option.promptCacheKey = promptCacheKey
+      // prompt_cache_key 与 store 无关：官方直连必发；第三方中转透传到上游即可命中，不透传也无害
+      option.promptCacheKey = promptCacheKey
+      if (option.store && supportsOpenAI24hPromptCache(input.providerConfig.model)) {
+        option.promptCacheRetention = '24h'
+      }
+    } else {
+      // @ai-sdk/openai-compatible 只校验 camelCase 标准项；厂商扩展字段要用请求体原名透传。
+      // 这里恢复 AI SDK 6 时代 OpenAI-compatible 服务常用的 prompt_cache_key 行为。
+      option.prompt_cache_key = promptCacheKey
     }
     if (Object.keys(option).length > 0) {
       const keys = new Set(['openai'])
@@ -140,12 +172,100 @@ export function buildProviderOptions(input: AgentRunInput, promptCacheKey: strin
   return Object.keys(options).length > 0 ? options as ProviderOptions : undefined
 }
 
-function withAnthropicCacheControl(providerOptions?: ProviderOptions): ProviderOptions {
+export type AgentProviderCacheStatus = {
+  providerKind: AgentRunInput['providerConfig']['providerKind']
+  providerName: string
+  model: string
+  promptCacheKey: string
+  promptCacheRetention?: '24h'
+  promptCacheEnabled: boolean
+  promptCacheProvider: 'openai-responses' | 'anthropic' | 'google' | 'openai-compatible' | 'none'
+  requestBodyPromptCacheField?: 'prompt_cache_key' | 'promptCacheKey'
+  reason?: string
+}
+
+export function buildProviderCacheStatus(input: AgentRunInput, promptCacheKey: string): AgentProviderCacheStatus {
+  const base = {
+    providerKind: input.providerConfig.providerKind,
+    providerName: input.providerConfig.name,
+    model: input.providerConfig.model,
+    promptCacheKey,
+  }
+  if (isOfficialOpenAIResponsesEndpoint(input)) {
+    return {
+      ...base,
+      ...(supportsOpenAI24hPromptCache(input.providerConfig.model) ? { promptCacheRetention: '24h' as const } : {}),
+      promptCacheEnabled: true,
+      promptCacheProvider: 'openai-responses',
+      requestBodyPromptCacheField: 'promptCacheKey',
+    }
+  }
+  if (input.providerConfig.providerKind === 'openai-responses') {
+    return {
+      ...base,
+      promptCacheEnabled: true,
+      promptCacheProvider: 'openai-responses',
+      requestBodyPromptCacheField: 'promptCacheKey',
+      reason: '第三方 responses 端点：已注入 promptCacheKey，是否命中取决于中转是否透传到上游并回传 cached_tokens。',
+    }
+  }
+  if (input.providerConfig.providerKind === 'anthropic') {
+    return {
+      ...base,
+      promptCacheEnabled: true,
+      promptCacheProvider: 'anthropic',
+      reason: `cache_control 断点 TTL ${input.providerConfig.anthropicCacheTtl || '5m'}（config key anthropicCacheTtl 可切 1h，写入计价 2×）。`,
+    }
+  }
+  if (input.providerConfig.providerKind === 'google') {
+    return {
+      ...base,
+      promptCacheEnabled: true,
+      promptCacheProvider: 'google',
+      reason: '自动创建 cachedContent 缓存稳定前缀（system+tools，TTL 1h，Google 按 token·小时收存储费）；前缀低于模型最小缓存长度或创建失败时回退直连，命中读 cachedContentTokenCount。',
+    }
+  }
+  if (input.providerConfig.providerKind === 'openai-compatible') {
+    if (isArkBaseURL(input.providerConfig.baseURL)) {
+      return {
+        ...base,
+        promptCacheEnabled: true,
+        promptCacheProvider: 'openai-compatible',
+        requestBodyPromptCacheField: 'prompt_cache_key',
+        reason: '火山方舟端点：system 前缀自动走 context 缓存（common_prefix，TTL 1h），创建失败回退直连。',
+      }
+    }
+    if (isDeepSeekProvider(input)) {
+      return {
+        ...base,
+        promptCacheEnabled: true,
+        promptCacheProvider: 'openai-compatible',
+        requestBodyPromptCacheField: 'prompt_cache_key',
+        reason: 'DeepSeek 上下文硬盘缓存默认开启；当前通过隐藏 system 历史消息保持多轮前缀可复现，并读取 prompt_cache_hit_tokens / prompt_cache_miss_tokens。',
+      }
+    }
+    return {
+      ...base,
+      promptCacheEnabled: true,
+      promptCacheProvider: 'openai-compatible',
+      requestBodyPromptCacheField: 'prompt_cache_key',
+      reason: '已通过 AI SDK openai-compatible 的 transformRequestBody 注入 prompt_cache_key；是否命中取决于服务商是否支持并返回 cached_tokens。',
+    }
+  }
+  return {
+    ...base,
+    promptCacheEnabled: false,
+    promptCacheProvider: 'none',
+    reason: '当前 provider 不支持可控 prompt cache 参数。',
+  }
+}
+
+function withAnthropicCacheControl(providerOptions: ProviderOptions | undefined, ttl: AnthropicCacheTtl): ProviderOptions {
   return {
     ...(providerOptions || {}),
     anthropic: {
       ...((providerOptions?.anthropic as Record<string, unknown> | undefined) || {}),
-      cacheControl: ANTHROPIC_CACHE_CONTROL,
+      cacheControl: { type: 'ephemeral', ttl },
     },
   }
 }
@@ -153,6 +273,7 @@ function withAnthropicCacheControl(providerOptions?: ProviderOptions): ProviderO
 export function applyAnthropicCacheControl(
   messages: SystemModelMessage[],
   tools: ToolSet,
+  ttl: AnthropicCacheTtl = '5m',
 ): { messages: SystemModelMessage[]; tools: ToolSet } {
   let remainingBreakpoints = MAX_ANTHROPIC_CACHE_BREAKPOINTS
   const takeBreakpoint = () => {
@@ -162,14 +283,14 @@ export function applyAnthropicCacheControl(
   }
   const nextMessages = messages.map((message, index) => (
     index === 0 && takeBreakpoint()
-      ? { ...message, providerOptions: withAnthropicCacheControl(message.providerOptions) }
+      ? { ...message, providerOptions: withAnthropicCacheControl(message.providerOptions, ttl) }
       : message
   ))
 
   const nextTools: ToolSet = {}
   for (const [name, item] of Object.entries(tools)) {
     nextTools[name] = CACHEABLE_BUILTIN_TOOL_NAMES.has(name) && takeBreakpoint()
-      ? { ...item, providerOptions: withAnthropicCacheControl(item.providerOptions) } as typeof item
+      ? { ...item, providerOptions: withAnthropicCacheControl(item.providerOptions, ttl) } as typeof item
       : item
   }
 

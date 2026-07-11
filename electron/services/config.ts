@@ -129,6 +129,8 @@ interface ConfigSchema {
   }
   agentCodeWorkspaceRoot: string
   agentCodeWorkspaceApprovalPolicy: 'on-request' | 'risk-based' | 'full-access'
+  // Agent 工具审批策略（发送微信媒体/文件、导出、任务、MCP 等，见 toolApproval.ts）；语义与上面的代码工作区策略一致
+  agentToolApprovalPolicy: 'on-request' | 'risk-based' | 'full-access'
   // 嵌入模型（语义/向量检索，独立于聊天模型）
   embeddingConfig: {
     enabled: boolean
@@ -211,6 +213,8 @@ interface ConfigSchema {
   }
   // 主进程探测到的系统代理 URL（写入后供 AI 子进程/嵌入跨进程读取；子进程无 session API 探测不了）
   aiResolvedProxyUrl: string
+  // Anthropic prompt cache 断点 TTL：1h 档写入计价 2×（5m 档 1.25×），稀疏流量才划算
+  anthropicCacheTtl: '5m' | '1h'
   // AI 宠物（petdex 宠物包格式，用户宠物包存放在 cachePath/pets/<slug>/）
   petCurrent: string         // 当前宠物 slug，空 = 不展示
   petDesktopEnabled: boolean  // 桌面悬浮桌宠开关
@@ -235,9 +239,54 @@ interface ConfigSchema {
   mcpExposeMediaPaths: boolean
   mcpProxyPort: number
   mcpProxyToken: string
+  // Agent 工具审批 HMAC 签名密钥：跨 AI utility 进程重启/App 重启保持稳定，
+  // 否则每次重启换新密钥会让待处理的审批签名验证失败（见 engine.ts TOOL_APPROVAL_SECRET）
+  agentToolApprovalSecret: string
+  // 待处理工具审批的签名缓存落盘副本，App 完整重启后用它重建 aiHandlers.ts 里的内存 Map，
+  // 否则重启后签名缓存清空、待确认卡片点了也会因"找不到缓存签名"而失败
+  agentToolApprovalSignatures: Array<{ approvalId: string; toolCallId: string; signature: string; at: number }>
+  localCodingAgentConfig: {
+    enabled: boolean
+    activeAgent: string
+    agents: Record<string, {
+      kind: 'codex' | 'claude-cli' | 'opencode' | 'custom'
+      name: string
+      executablePath: string
+      argsTemplate?: string[]
+      env?: Record<string, string>
+      timeoutMs: number
+      model?: string
+    }>
+  }
 }
 
 const defaults: ConfigSchema = {
+  agentToolApprovalSecret: '',
+  agentToolApprovalSignatures: [],
+  localCodingAgentConfig: {
+    enabled: false,
+    activeAgent: 'codex',
+    agents: {
+      codex: {
+        kind: 'codex',
+        name: 'Codex CLI',
+        executablePath: '',
+        timeoutMs: 1_800_000,
+      },
+      claude: {
+        kind: 'claude-cli',
+        name: 'Claude Code',
+        executablePath: '',
+        timeoutMs: 1_800_000,
+      },
+      opencode: {
+        kind: 'opencode',
+        name: 'OpenCode',
+        executablePath: '',
+        timeoutMs: 1_800_000,
+      },
+    },
+  },
   dbPath: '',
   decryptKey: '',
   myWxid: '',
@@ -300,6 +349,7 @@ const defaults: ConfigSchema = {
   aiProviderModelCache: {},
   agentCodeWorkspaceRoot: '',
   agentCodeWorkspaceApprovalPolicy: 'on-request',
+  agentToolApprovalPolicy: 'on-request',
   embeddingConfig: {
     enabled: false,
     provider: '',
@@ -371,10 +421,11 @@ const defaults: ConfigSchema = {
     apiKey: '',
     baseURL: 'https://api.siliconflow.cn/v1',
     model: 'Kwai-Kolors/Kolors',
-    size: '1024x1024',
+    size: '', // 空 = AI 按构图自选；填了则作 AI 未传 size 时的回退
     timeoutMs: IMAGE_GEN_DEFAULT_TIMEOUT_MS,
   },
   aiResolvedProxyUrl: '',
+  anthropicCacheTtl: '5m',
   petCurrent: '',
   petDesktopEnabled: true,
   petDefaultInitialized: false,

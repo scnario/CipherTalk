@@ -3,10 +3,9 @@
  * 从 AgentPage.tsx 拆出，供主组件和 AgentSubAgentProgress 等复用。
  */
 import { Tooltip } from '@heroui/react'
-import { ChartColumn, Code, LayoutHeaderCellsLarge, Link, QuoteOpen } from '@gravity-ui/icons'
+import { QuoteOpen } from '@gravity-ui/icons'
 import { isToolUIPart, type UIMessage } from 'ai'
 import { Sources, SourcesContent, SourcesTrigger } from '@/components/ai-elements/sources'
-import { type MessageRenderActivity } from '@/components/ai-elements/message'
 import { Shimmer } from '@/components/ai-elements/shimmer'
 
 // ====== 计划模式控制标记 ======
@@ -23,6 +22,28 @@ export function planRequiresDelegateAnalysis(text: string): boolean {
 
 // ====== 工具名 → 中文标签 ======
 export const TOOL_LABELS: Record<string, string> = {
+  list_contacts: '查看联系人',
+  search_messages: '搜索聊天记录',
+  semantic_search: '语义检索聊天记录',
+  get_context: '查看上下文',
+  get_timeline: '查看时间线',
+  chat_stats: '聊天统计',
+  list_groups: '查看群聊列表',
+  group_members: '查看群成员',
+  group_member_ranking: '群成员活跃排行',
+  query_sql: '查询数据库',
+  update_plan: '更新计划',
+  code_workspace_status: '查看工作区状态',
+  code_list_files: '列出文件',
+  code_read_file: '读取文件',
+  code_get_dev_server_logs: '查看开发服务器日志',
+  code_get_browser_diagnostics: '查看浏览器诊断',
+  code_replace_in_file: '编辑文件',
+  code_write_file: '写入文件',
+  code_delete_file: '删除文件',
+  code_run_command: '运行命令',
+  code_start_dev_server: '启动开发服务器',
+  code_stop_dev_server: '停止开发服务器',
   delegate_analysis: '委托子助手',
   remember: '保存记忆',
   recall: '查找记忆',
@@ -64,7 +85,9 @@ export const TOOL_LABELS: Record<string, string> = {
   apply_memory_fix: '修复记忆',
   persona_control: '数字分身',
   auto_memory: '自动记忆',
-  final_review: '最终审核',
+  // 本地编码智能体（codex）的结构化事件
+  run_command: '运行命令',
+  file_change: '文件变更',
 }
 
 export type PersonaControlOutput = {
@@ -86,6 +109,23 @@ export function formatToolName(toolName: string) {
   return TOOL_LABELS[toolName] ?? toolName.replace(/[_-]+/g, ' ')
 }
 
+// ====== 工具审批一行动态说明（输入框上方审批条用）======
+// 通用兜底：不为每个工具写专属映射，按常见字段名取第一个命中的当关键信息
+const APPROVAL_DETAIL_KEYS = ['title', 'command', 'filePath', 'media', 'path', 'query', 'sessionId', 'md5', 'name']
+
+export function describeToolApprovalRequest(toolName: string, input: unknown): string {
+  const label = formatToolName(toolName)
+  const record = input && typeof input === 'object' && !Array.isArray(input) ? input as Record<string, unknown> : null
+  if (!record) return label
+  for (const key of APPROVAL_DETAIL_KEYS) {
+    const value = record[key]
+    if (typeof value === 'string' && value.trim()) {
+      return `${label} · ${value.trim().slice(0, 60)}`
+    }
+  }
+  return label
+}
+
 export function getPersonaControlOutput(part: unknown): PersonaControlOutput | null {
   const p = part as { type?: unknown; state?: unknown; output?: unknown }
   if (p?.type !== 'tool-persona_control' || p.state !== 'output-available') return null
@@ -100,47 +140,6 @@ export function renderChainLabel(label: string, active: boolean) {
       {label}
     </Shimmer>
   )
-}
-
-export function renderOutputActivitySteps(activity: MessageRenderActivity, isStreaming: boolean) {
-  const steps: Array<{ key: string; icon: typeof ChartColumn; label: string; doneLabel: string; active: boolean }> = []
-  if (activity.hasChart || activity.pendingChart) {
-    steps.push({
-      key: 'chart',
-      icon: ChartColumn,
-      label: '正在生成图表',
-      doneLabel: '已生成图表',
-      active: isStreaming,
-    })
-  }
-  if (activity.hasTable || activity.pendingTable) {
-    steps.push({
-      key: 'table',
-      icon: LayoutHeaderCellsLarge,
-      label: '正在整理表格',
-      doneLabel: '已整理表格',
-      active: isStreaming,
-    })
-  }
-  if (activity.hasCode || activity.pendingCode) {
-    steps.push({
-      key: 'code',
-      icon: Code,
-      label: '正在生成代码块',
-      doneLabel: '已生成代码块',
-      active: isStreaming,
-    })
-  }
-  if (activity.hasLink || activity.pendingLink) {
-    steps.push({
-      key: 'link',
-      icon: Link,
-      label: '正在处理链接',
-      doneLabel: activity.linkCount > 0 ? `已处理链接 ${activity.linkCount} 条` : '已处理链接',
-      active: isStreaming && (activity.pendingLink || activity.hasLink),
-    })
-  }
-  return steps
 }
 
 export function formatElapsed(ms: number) {

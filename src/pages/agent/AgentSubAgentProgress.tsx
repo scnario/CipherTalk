@@ -3,6 +3,7 @@
  * 从 AgentPage.tsx 拆出。
  */
 import { useEffect, useState } from 'react'
+import { Card } from '@heroui/react'
 import { CircleInfo, Magnifier, Sparkles, Wrench } from '@gravity-ui/icons'
 import type { AgentProgressEvent } from '@/features/aiagent/transport/ipcChatTransport'
 import { Loader } from '@/components/ai-elements/loader'
@@ -42,8 +43,31 @@ function subAgentProgressKey(progress: AgentProgressEvent) {
   return `${groupKey}:event:${progress.depth ?? 0}:${progress.stage}:${progress.title}:${progress.sessionId ?? ''}`
 }
 
+function sameSubAgentProgressEvent(left: AgentProgressEvent, right: AgentProgressEvent) {
+  return left.stage === right.stage
+    && left.title === right.title
+    && left.detail === right.detail
+    && left.visible === right.visible
+    && left.category === right.category
+    && left.toolName === right.toolName
+    && left.toolCallId === right.toolCallId
+    && left.parentToolCallId === right.parentToolCallId
+    && left.subTaskId === right.subTaskId
+    && left.subTaskTitle === right.subTaskTitle
+    && left.sessionId === right.sessionId
+    && left.elapsedMs === right.elapsedMs
+    && left.messagesScanned === right.messagesScanned
+    && left.indexedCount === right.indexedCount
+    && left.sessionsScanned === right.sessionsScanned
+    && left.coverage === right.coverage
+    && left.depth === right.depth
+    && left.at === right.at
+}
+
 export function mergeSubAgentProgress(prev: AgentProgressEvent[], progress: AgentProgressEvent) {
   const key = subAgentProgressKey(progress)
+  const existing = prev.find((item) => subAgentProgressKey(item) === key)
+  if (existing && sameSubAgentProgressEvent(existing, progress)) return prev
   const next = prev.filter((item) => subAgentProgressKey(item) !== key)
   return [...next, progress].slice(-SUB_AGENT_PROGRESS_LIMIT)
 }
@@ -184,20 +208,17 @@ export function SubAgentProgressPanel({ events, tasks }: { events: AgentProgress
   const failedGroups = groups.filter((group) => group.latest.stage === 'error').length
 
   return (
-    <section
-      aria-live="polite"
-      className="mt-2 rounded-(--agent-radius,12px) border border-border bg-surface/80 px-3 py-2.5 text-xs shadow-xs"
-    >
-      <div className="mb-2 flex min-w-0 items-center gap-2 font-medium text-foreground">
-        <Sparkles className="size-3.5 shrink-0" />
+    <div aria-live="polite" className="mt-1.5 space-y-1.5 text-xs">
+      <div className="flex min-w-0 items-center gap-2 font-medium text-foreground">
+        <Sparkles className="size-3.5 shrink-0 text-muted-foreground" />
         <span className="shrink-0">{formatSubAgentPanelTitle(groups, latest)}</span>
         <span className="min-w-0 truncate text-muted-foreground font-normal">
           {formatSubAgentProgressTitle(latest)}
         </span>
       </div>
       {tasks && tasks.length > 0 && (
-        <div className="mb-2 rounded-(--agent-radius,12px) bg-muted/50 px-2 py-1.5 text-muted-foreground">
-          <div className="mb-0.5 text-[11px] text-foreground">委托任务</div>
+        <Card className="w-fit max-w-full gap-1" variant="transparent">
+          <div className="text-[11px] text-muted-foreground">委托任务</div>
           {tasks.length === 1 ? (
             <div className="line-clamp-3 whitespace-pre-wrap wrap-break-word">{tasks[0]}</div>
           ) : (
@@ -209,28 +230,28 @@ export function SubAgentProgressPanel({ events, tasks }: { events: AgentProgress
               ))}
             </ol>
           )}
-        </div>
+        </Card>
       )}
-      <div className="mb-2 flex flex-wrap gap-1">
+      <div className="flex flex-wrap gap-1">
         <span className="rounded-full bg-muted/60 px-2 py-0.5 text-muted-foreground">{events.length} 条进度</span>
         {groups.length > 1 && <span className="rounded-full bg-muted/60 px-2 py-0.5 text-muted-foreground">完成 {finishedGroups}/{groups.length}</span>}
         {failedGroups > 0 && <span className="rounded-full bg-destructive/10 px-2 py-0.5 text-destructive">失败 {failedGroups}</span>}
         {toolCount > 0 && <span className="rounded-full bg-muted/60 px-2 py-0.5 text-muted-foreground">{toolCount} 个工具</span>}
         <span className="rounded-full bg-muted/60 px-2 py-0.5 text-muted-foreground">最近 {formatProgressTime(latest.at)}</span>
       </div>
-      <div className="space-y-2">
+      <div className="space-y-1.5 border-border/50 border-l pl-3">
         {groups.map((group) => {
           const groupLatestKey = subAgentProgressKey(group.latest)
           return (
-            <div className="rounded-(--agent-radius,12px) bg-muted/30 px-2 py-1.5" key={group.key}>
+            <div className="space-y-1" key={group.key}>
               {groups.length > 1 && (
-                <div className="mb-1 flex min-w-0 items-center gap-2 font-medium text-foreground">
+                <div className="flex min-w-0 items-center gap-2 font-medium text-foreground">
                   <span className={`size-1.5 shrink-0 rounded-full ${subAgentProgressDotClass(group.latest)}`} />
                   <span className="min-w-0 flex-1 truncate">{group.title}</span>
                   <span className="shrink-0 text-[10px] text-muted-foreground">{formatSubAgentStage(group.latest)}</span>
                 </div>
               )}
-              <div className="space-y-1">
+              <div className={groups.length > 1 ? 'space-y-1 border-border/40 border-l pl-3' : 'space-y-1'}>
                 {group.events.slice(groups.length > 1 ? -4 : -SUB_AGENT_PROGRESS_LIMIT).map((progress) => {
                   const Icon = subAgentProgressIcon(progress)
                   const itemKey = subAgentProgressKey(progress)
@@ -241,7 +262,7 @@ export function SubAgentProgressPanel({ events, tasks }: { events: AgentProgress
                     && progress.stage !== 'error'
                   return (
                     <div
-                      className="flex min-w-0 items-start gap-2 rounded-(--agent-radius,12px) px-1 py-0.5 text-muted-foreground"
+                      className="flex min-w-0 items-start gap-2 text-muted-foreground"
                       key={itemKey}
                     >
                       <span className="relative mt-0.5 inline-flex size-4 shrink-0 items-center justify-center">
@@ -275,6 +296,6 @@ export function SubAgentProgressPanel({ events, tasks }: { events: AgentProgress
           )
         })}
       </div>
-    </section>
+    </div>
   )
 }

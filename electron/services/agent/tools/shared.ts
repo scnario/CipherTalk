@@ -6,6 +6,7 @@
  */
 import type { Message } from '../../chatService'
 import type { ChatSearchIndexHit } from '../../search/chatSearchIndexService'
+import { truncateText } from '../errorFormat'
 import { reportAgentProgress } from '../progress'
 
 /** 归一到毫秒：秒级(<=1e12)自动 ×1000。无效返回 null。 */
@@ -113,60 +114,86 @@ export async function searchChat(opts: {
   const RECENT_SESSION_CAP = 20
   const GLOBAL_INDEX_MESSAGE_CAP = 800
   const SESSION_INDEX_MESSAGE_CAP = 5000
+  // 单会话命中不足时逐步向更早历史加深（每轮目标×4：5000→2万→8万→32万），扫完或够用即停
+  const SESSION_DEEPEN_MAX_ROUNDS = 3
   const { chatSearchIndexService } = await import('../../search/chatSearchIndexService')
-
-  const targetSessions = opts.sessionId
-    ? [opts.sessionId]
-    : await getRecentChatSessions(RECENT_SESSION_CAP)
-  const batches = opts.sessionId
-    ? [targetSessions]
-    : [targetSessions].filter((batch) => batch.length > 0)
 
   const perSession = Math.max(opts.limit, 10)
   const raw: ChatSearchIndexHit[] = []
   let sessionsScanned = 0
-  for (const batch of batches) {
-    if (batch.length === 0) continue
+
+  const indexProgress = (progress: { stage: string; message: string; sessionId?: string; messagesScanned?: number; indexedCount?: number }) => {
     reportAgentProgress({
-      stage: 'searching',
-      title: opts.sessionId ? '搜索当前会话' : '搜索最近活跃会话',
-      detail: opts.query,
+      stage: progress.stage === 'searching_index' ? 'searching' : 'indexing',
+      title: progress.message,
+      sessionId: progress.sessionId,
+      messagesScanned: progress.messagesScanned,
+      indexedCount: progress.indexedCount,
       sessionsScanned,
-      coverage: opts.sessionId ? 'session_partial' : `recent_${RECENT_SESSION_CAP}_partial`,
+    })
+  }
+  const runSearch = (sid: string, maxIndexMessages?: number) =>
+    chatSearchIndexService.searchSession({
+      sessionId: sid,
+      query: opts.query,
+      limit: perSession,
+      startTimeMs: opts.startTimeMs,
+      endTimeMs: opts.endTimeMs,
+      maxIndexMessages,
+      reusePartialIndex: true,
+      onProgress: indexProgress,
     })
 
-    for (const sid of batch) {
+  let coverage: string
+  if (opts.sessionId) {
+    reportAgentProgress({
+      stage: 'searching',
+      title: '搜索当前会话',
+      detail: opts.query,
+      sessionsScanned,
+      coverage: 'session_partial',
+    })
+    let r = await runSearch(opts.sessionId, SESSION_INDEX_MESSAGE_CAP)
+    sessionsScanned = 1
+    for (let round = 0; r.hits.length < opts.limit && !r.indexComplete && round < SESSION_DEEPEN_MAX_ROUNDS; round += 1) {
+      reportAgentProgress({
+        stage: 'indexing',
+        title: `近 ${r.indexedCount} 条内命中不足，向更早的记录扩大搜索`,
+        detail: opts.query,
+        sessionsScanned,
+      })
       try {
-        const r = await chatSearchIndexService.searchSession({
-          sessionId: sid,
-          query: opts.query,
-          limit: perSession,
-          startTimeMs: opts.startTimeMs,
-          endTimeMs: opts.endTimeMs,
-          maxIndexMessages: opts.sessionId ? SESSION_INDEX_MESSAGE_CAP : GLOBAL_INDEX_MESSAGE_CAP,
-          reusePartialIndex: true,
-          onProgress: (progress) => {
-            reportAgentProgress({
-              stage: progress.stage === 'searching_index' ? 'searching' : 'indexing',
-              title: progress.message,
-              sessionId: progress.sessionId,
-              messagesScanned: progress.messagesScanned,
-              indexedCount: progress.indexedCount,
-              sessionsScanned,
-            })
-          },
-        })
+        await chatSearchIndexService.deepenSessionIndex(
+          opts.sessionId,
+          Math.max(r.indexedCount * 4, 20000),
+          indexProgress,
+        )
+      } catch {
+        break // 加深失败不影响已有结果
+      }
+      r = await runSearch(opts.sessionId) // 不带上限：复用刚加深的部分索引
+    }
+    raw.push(...r.hits)
+    coverage = r.indexComplete ? 'session_full' : `session_recent_${r.indexedCount}`
+  } else {
+    const targetSessions = await getRecentChatSessions(RECENT_SESSION_CAP)
+    reportAgentProgress({
+      stage: 'searching',
+      title: '搜索最近活跃会话',
+      detail: opts.query,
+      sessionsScanned,
+      coverage: `recent_${RECENT_SESSION_CAP}_partial`,
+    })
+    for (const sid of targetSessions) {
+      try {
+        const r = await runSearch(sid, GLOBAL_INDEX_MESSAGE_CAP)
         sessionsScanned += 1
         raw.push(...r.hits)
       } catch {
         /* 单会话索引/检索失败则跳过 */
       }
     }
-
-    raw.sort((a, b) => b.score - a.score)
-    if (opts.sessionId || raw.length >= opts.limit) {
-      break
-    }
+    coverage = `recent_${RECENT_SESSION_CAP}_messages_${GLOBAL_INDEX_MESSAGE_CAP}`
   }
 
   raw.sort((a, b) => b.score - a.score)
@@ -183,9 +210,6 @@ export async function searchChat(opts: {
       anchor: { sessionId: h.sessionId, localId: m.localId, sortSeq: m.sortSeq, createTime: m.createTime },
     }
   })
-  const coverage = opts.sessionId
-    ? `session_recent_${SESSION_INDEX_MESSAGE_CAP}`
-    : `recent_${RECENT_SESSION_CAP}_messages_${GLOBAL_INDEX_MESSAGE_CAP}`
   return { hits, sessionsScanned, coverage }
 }
 
@@ -209,4 +233,39 @@ export function evidenceFromMessage(sessionId: string, message: CompactMessage):
     sender: message.sender,
     text: message.text,
   }
+}
+
+function readableErrorMessage(error: unknown): string {
+  if (!error) return ''
+  if (error instanceof Error && error.message.trim()) return error.message.trim()
+  if (typeof error === 'string' && error.trim()) return error.trim()
+  const record = error && typeof error === 'object' ? error as Record<string, unknown> : null
+  const direct = record?.message
+  if (typeof direct === 'string' && direct.trim()) return direct.trim()
+  const nested = record?.error
+  if (typeof nested === 'string' && nested.trim()) return nested.trim()
+  if (nested && typeof nested === 'object') {
+    const nestedMessage = (nested as Record<string, unknown>).message
+    if (typeof nestedMessage === 'string' && nestedMessage.trim()) return nestedMessage.trim()
+  }
+  const text = String(error).trim()
+  return text && text !== '[object Object]' && text !== 'Error' ? text : ''
+}
+
+export function describeToolError(error: unknown, fallback = '工具执行失败'): string {
+  const record = error && typeof error === 'object' ? error as Record<string, unknown> : null
+  const details = [readableErrorMessage(error) || fallback]
+
+  const status = record?.statusCode ?? record?.status
+  if (typeof status === 'number') details.push(`status=${status}`)
+  if (typeof record?.url === 'string' && record.url) details.push(`url=${record.url}`)
+  if (typeof record?.responseBody === 'string' && record.responseBody) {
+    details.push(`responseBody=${truncateText(record.responseBody, 600)}`)
+  }
+
+  const cause = record?.cause
+  const causeMessage = readableErrorMessage(cause)
+  if (causeMessage && causeMessage !== details[0]) details.push(`cause=${truncateText(causeMessage, 400)}`)
+
+  return details.filter(Boolean).join(' | ')
 }

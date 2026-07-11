@@ -191,7 +191,6 @@ export const ChartBlock = forwardRef<ChartBlockHandle, ChartBlockProps>(function
   const rootRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<ECharts | null>(null);
   const normalizedOption = useMemo(() => normalizeChartLayout(option), [option]);
-  const optionKey = useMemo(() => JSON.stringify(normalizedOption), [normalizedOption]);
 
   useImperativeHandle(ref, () => ({
     getDataURL: () => {
@@ -212,7 +211,6 @@ export const ChartBlock = forwardRef<ChartBlockHandle, ChartBlockProps>(function
 
     const chart = echarts.init(root, undefined, { renderer: "canvas" });
     chartRef.current = chart;
-    chart.setOption(normalizedOption, true);
 
     const resize = () => chart.resize();
     const frame = window.requestAnimationFrame(resize);
@@ -227,7 +225,7 @@ export const ChartBlock = forwardRef<ChartBlockHandle, ChartBlockProps>(function
       chart.dispose();
       if (chartRef.current === chart) chartRef.current = null;
     };
-  }, [optionKey, normalizedOption]);
+  }, []);
 
   useEffect(() => {
     chartRef.current?.setOption(normalizedOption, true);

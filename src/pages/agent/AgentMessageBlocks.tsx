@@ -3,8 +3,8 @@
  * 从 AgentPage.tsx 拆出。
  */
 import { memo, useEffect, useRef, useState, type ReactNode } from 'react'
-import { Dropdown, Label } from '@heroui/react'
-import { ArrowsRotateLeft, Bulb, Check, ChevronDown, Copy, CurlyBrackets, FileText, ListCheck, PencilToLine, Picture, Wrench } from '@gravity-ui/icons'
+import { Card, Dropdown, Label } from '@heroui/react'
+import { ArrowsRotateLeft, Bulb, Check, ChevronDown, Copy, CurlyBrackets, FileText, ListCheck, PencilToLine, Picture, Terminal, Wrench } from '@gravity-ui/icons'
 import {
   ChainOfThought,
   ChainOfThoughtContent,
@@ -18,6 +18,7 @@ export type AgentModelItem = {
   chef: string
   chefSlug: string
   id: string
+  kind?: 'local-agent'
   name: string
   modelDetail?: AIModelInfo
   disabled?: boolean
@@ -51,7 +52,9 @@ export const ModelItem = memo(
     return (
       <Dropdown.Item id={model.id} key={model.id} textValue={model.name}>
         <Dropdown.ItemIndicator />
-        {model.chefSlug && <AIProviderLogo providerId={model.chefSlug} alt={model.chef} className="shrink-0" size={20} />}
+        {model.kind === 'local-agent'
+          ? <Terminal className="size-5 shrink-0 text-muted" />
+          : model.chefSlug && <AIProviderLogo providerId={model.chefSlug} alt={model.chef} className="shrink-0" size={20} />}
         <Label className="min-w-0 flex-1 truncate text-left">{model.name}</Label>
         <span className="ml-auto flex shrink-0 items-center gap-1.5">
           {model.modelDetail && <ModelCapabilityIcons detail={model.modelDetail} />}
@@ -126,6 +129,52 @@ export function CompactionMarker({ data }: { data: CompactionPartData }) {
         <div className="mt-2 whitespace-pre-wrap wrap-break-word rounded-(--agent-radius,12px) border border-border bg-surface/70 px-3 py-2 text-muted-foreground text-xs leading-6">
           {data.summary}
         </div>
+      )}
+    </div>
+  )
+}
+
+// 工具调用的原始参数/返回：默认收起，用户想看点开就有。数据大时截断，避免刷屏。
+const TOOL_IO_CHAR_CAP = 4000
+
+function formatToolValue(value: unknown): string {
+  if (value == null) return ''
+  if (typeof value === 'string') return value.trim()
+  try { return JSON.stringify(value, null, 2) } catch { return String(value) }
+}
+
+function ToolIOSection({ label, text }: { label: string; text: string }) {
+  if (!text) return null
+  const clipped = text.length > TOOL_IO_CHAR_CAP ? `${text.slice(0, TOOL_IO_CHAR_CAP)}\n…（已截断，共 ${text.length} 字）` : text
+  return (
+    <Card className="mt-1.5 w-fit max-w-full gap-1" variant="transparent">
+      <div className="text-[11px] text-muted-foreground">{label}</div>
+      <pre className="max-h-64 max-w-full overflow-auto whitespace-pre-wrap wrap-break-word text-[11px] text-foreground leading-5">{clipped}</pre>
+    </Card>
+  )
+}
+
+export function ToolIODetails({ input, output }: { input?: unknown; output?: unknown }) {
+  const [open, setOpen] = useState(false)
+  const inputText = formatToolValue(input)
+  const outputText = formatToolValue(output)
+  if (!inputText && !outputText) return null
+  return (
+    <div className="mt-1">
+      <button
+        aria-expanded={open}
+        className="flex items-center gap-1 text-muted-foreground text-[11px] hover:text-foreground"
+        onClick={() => setOpen((value) => !value)}
+        type="button"
+      >
+        <ChevronDown className={`size-3 shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
+        {open ? '收起调用详情' : '查看调用详情'}
+      </button>
+      {open && (
+        <>
+          <ToolIOSection label="参数" text={inputText} />
+          <ToolIOSection label="结果" text={outputText} />
+        </>
       )}
     </div>
   )

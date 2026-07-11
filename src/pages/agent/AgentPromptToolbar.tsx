@@ -13,12 +13,12 @@ import {
   usePromptInputController,
   type PromptInputControllerProps,
 } from '@/components/ai-elements/prompt-input'
-import type { CodeWorkspaceApprovalPolicy } from '@/types/electron'
+import type { AgentToolApprovalPolicy } from '@/types/electron'
 import {
-  CODE_WORKSPACE_APPROVAL_POLICY_OPTIONS,
+  AGENT_TOOL_APPROVAL_POLICY_OPTIONS,
   PROMPT_PRESET_GROUPS,
-  codeWorkspaceApprovalPolicyOption,
-  codeWorkspaceApprovalPolicyToneClass,
+  agentToolApprovalPolicyOption,
+  agentToolApprovalPolicyToneClass,
 } from './agentPromptPresets'
 
 function removeLeadingSlashCommand(value: string) {
@@ -27,21 +27,21 @@ function removeLeadingSlashCommand(value: string) {
   return ''
 }
 
-export function CodeWorkspaceApprovalPolicyDropdown({
+export function AgentToolApprovalPolicyDropdown({
   policy,
   onChange,
 }: {
-  policy: CodeWorkspaceApprovalPolicy
-  onChange: (policy: CodeWorkspaceApprovalPolicy) => void
+  policy: AgentToolApprovalPolicy
+  onChange: (policy: AgentToolApprovalPolicy) => void
 }) {
-  const current = codeWorkspaceApprovalPolicyOption(policy)
+  const current = agentToolApprovalPolicyOption(policy)
   const CurrentIcon = current.icon
-  const currentToneClass = codeWorkspaceApprovalPolicyToneClass(current.value)
+  const currentToneClass = agentToolApprovalPolicyToneClass(current.value)
 
   return (
     <Dropdown>
       <HeroButton
-        aria-label="设置代码工作区权限"
+        aria-label="设置 Agent 工具审批策略"
         className={`gap-1 ${currentToneClass}`}
         size="sm"
         variant="tertiary"
@@ -52,19 +52,16 @@ export function CodeWorkspaceApprovalPolicyDropdown({
       </HeroButton>
       <Dropdown.Popover className="w-80 max-w-[calc(100vw-2rem)]" placement="top start">
         <div className="border-border/70 border-b px-3 py-2.5">
-          <div className="flex items-center justify-between gap-3">
-            <Label className="text-sm">如何批准代码操作？</Label>
-            <span className="text-muted-foreground text-xs">同步到微信</span>
-          </div>
+          <Label className="text-sm">如何批准 Agent 的高风险操作？</Label>
         </div>
         <Dropdown.Menu
           selectedKeys={new Set([current.value])}
           selectionMode="single"
-          onAction={(key) => onChange(String(key) as CodeWorkspaceApprovalPolicy)}
+          onAction={(key) => onChange(String(key) as AgentToolApprovalPolicy)}
         >
-          {CODE_WORKSPACE_APPROVAL_POLICY_OPTIONS.map((option) => {
+          {AGENT_TOOL_APPROVAL_POLICY_OPTIONS.map((option) => {
             const Icon = option.icon
-            const toneClass = codeWorkspaceApprovalPolicyToneClass(option.value)
+            const toneClass = agentToolApprovalPolicyToneClass(option.value)
             return (
               <Dropdown.Item id={option.value} key={option.value} textValue={option.label}>
                 <Dropdown.ItemIndicator />
