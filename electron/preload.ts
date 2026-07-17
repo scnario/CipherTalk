@@ -404,6 +404,23 @@ contextBridge.exposeInMainWorld('electronAPI', {
     cancelStream: (streamId: string) => ipcRenderer.invoke('tts:streamCancel', streamId) as Promise<{ success: boolean }>,
   },
 
+  // 豆包端到端实时语音。凭据和分身画像只在主进程读取，渲染端只传音频与会话标识。
+  voiceRealtime: {
+    start: (payload: { callId: string; sessionId: string; dialogContext?: Array<{ role: 'user' | 'assistant'; text: string; timestamp?: number }> }) =>
+      ipcRenderer.invoke('voice-realtime:start', payload) as Promise<{ success: boolean; callId?: string; error?: string }>,
+    sendAudio: (callId: string, audio: Uint8Array) => ipcRenderer.send('voice-realtime:audio', callId, audio),
+    truncate: (callId: string, replyId: string, audioEndMs: number) =>
+      ipcRenderer.invoke('voice-realtime:truncate', callId, replyId, audioEndMs) as Promise<{ success: boolean; error?: string }>,
+    stop: (callId: string) => ipcRenderer.invoke('voice-realtime:stop', callId) as Promise<{ success: boolean; error?: string }>,
+    onEvent: (callId: string, callback: (event: unknown) => void): (() => void) => {
+      const listener = (_event: unknown, payload: { callId?: string; event?: unknown }) => {
+        if (payload?.callId === callId && payload.event) callback(payload.event)
+      }
+      ipcRenderer.on('voice-realtime:event', listener)
+      return () => ipcRenderer.removeListener('voice-realtime:event', listener)
+    },
+  },
+
   // AI 作图 —— AI 助手 generate_image 工具
   imageGen: {
     getConfig: () => ipcRenderer.invoke('imageGen:getConfig') as Promise<{ success: boolean; config?: unknown; available?: boolean; error?: string }>,
@@ -841,6 +858,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     downloadModel: () => ipcRenderer.invoke('stt:downloadModel'),
     cancelDownloadModel: () => ipcRenderer.invoke('stt:cancelDownloadModel'),
     transcribe: (wavBase64: string, sessionId: string, createTime: number, force?: boolean, localId?: number) => ipcRenderer.invoke('stt:transcribe', wavBase64, sessionId, createTime, force, localId),
+    transcribeBuffer: (wavBase64: string) => ipcRenderer.invoke('stt:transcribeBuffer', wavBase64),
     testOnlineConfig: (overrides?: { provider?: 'openai-compatible' | 'aliyun-qwen-asr' | 'qianwen-cloud' | 'volcano-doubao' | 'custom'; apiKey?: string; baseURL?: string; model?: string; language?: string; timeoutMs?: number }) =>
       ipcRenderer.invoke('stt-online:test-config', overrides),
     onDownloadProgress: (callback: (progress: { modelName: string; downloadedBytes: number; totalBytes?: number; percent?: number }) => void) => {
