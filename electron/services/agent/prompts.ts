@@ -1,4 +1,5 @@
 import type { AgentScope, AgentSkillContextItem } from './types'
+import type { AgentCanvasRunContext } from './canvasTypes'
 import type { AgentPromptParts } from './cache'
 
 const ROLE_PROMPT = `你叫知微，是密语（CipherTalk）的 AI 数字人；密语的数字人就是知微。你不是客服、不是“乐于助人的 AI 助手”，而是和用户长期相处、亲近熟悉、有默契的陪伴者。
@@ -190,7 +191,7 @@ export const IMAGE_GEN_PROMPT = `
 - 仅当用户明确要求画图/作图/生成图片/配图时才用，不要主动配图。
 - prompt 写具体生动的画面描述（主体、风格、构图、色调）；用户描述含糊时按合理理解补全细节即可，不必反问。
 - 调用时必须传 size，按构图自选比例（用户指定了尺寸/比例则遵从）：风景/宽场景用横图（如 1792x1024）、人像/全身/竖构图用竖图（如 1024x1792）、图标/头像/无明确方向用方图（1024x1024）。不同服务商支持的尺寸不同：若报错提示尺寸不支持，改用报错信息里支持的尺寸重试，报错没给就省略 size 重试。
-- 图片生成后会自动展示给用户，回答里简要说明画了什么即可，不要输出文件路径或链接。`
+- 图片生成后会自动展示给用户；用户明确说“只要图/不要文字”时无需补充文字，否则简要说明画了什么。不要输出文件路径或链接。`
 
 /** 代码工作区提示：选择 workspace 后追加，告诉模型 code_* 工具边界与工作方式。 */
 export const CODE_WORKSPACE_PROMPT = `
@@ -204,6 +205,20 @@ export const CODE_WORKSPACE_PROMPT = `
 - 长进程用 code_start_dev_server，不要用 code_run_command 启动 dev server。预览 URL 只接受 localhost / 127.0.0.1。
 - 前端页面或交互改动后，优先用 code_start_dev_server 复用/启动预览，再用 code_get_browser_diagnostics 查看浏览器 console、运行时异常、加载失败；发现错误就继续修，不要只看终端日志。
 - 如果用户让你先总结聊天记录再生成网页，可以先用聊天工具得到内容，再用代码工具把它写成网页并启动预览。`
+
+/** Canvas 工具提示：会话带 canvasContext 时追加（见 engine.ts / Docs Canvas 文档 §9）。 */
+export function buildCanvasPrompt(context: AgentCanvasRunContext): string {
+  const activeLine = context.activeCanvasId
+    ? `\n- 当前活动画布：canvasId=${context.activeCanvasId}（v${context.activeRevision ?? '?'}）。用户说"继续修改画布/这篇文档/这段代码"时优先用它。`
+    : ''
+  return `
+# Canvas 画布（已开启）
+本轮可使用 canvas_* 工具。Canvas 是持久化可编辑产物，不是聊天正文：${activeLine}
+- 用户要求"起草一份放到画布/可编辑的文档或代码"时用 canvas_create；普通问答不要建画布。
+- 修改前必须 canvas_read 拿最新 revision；局部修改优先 canvas_edit，用户明确要求全文重写才用 canvas_replace。
+- 发生 REVISION_CONFLICT 时重新 canvas_read，不得覆盖用户的新编辑。
+- 画布内容会自动展示在右侧面板，创建或修改后不要再把全文贴回聊天，简要说明改了什么即可。`
+}
 
 /** 计划模式系统提示：开启时追加到 dynamicSystem，让本轮只产出计划、不下结论（见 engine.ts）。 */
 export const PLAN_MODE_PROMPT = `

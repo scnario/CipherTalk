@@ -4,6 +4,7 @@
  */
 import type { JSONSchema7, ModelMessage, UIMessageChunk } from 'ai'
 import type { CodeWorkspaceRef } from './codeWorkspaceTypes'
+import type { AgentCanvasRunContext } from './canvasTypes'
 
 /** AI SDK provider 协议种类（对齐 ai/providers/base.ts 的 ProviderKind）。 */
 export type ProviderKind = 'openai-responses' | 'openai-compatible' | 'anthropic' | 'google'
@@ -34,6 +35,17 @@ export interface AgentProviderConfigOverride {
   baseURL?: string
   protocol?: ProviderKind
   reasoningEffort?: AgentReasoningEffort
+}
+
+export interface AgentPromptOptimizeContextMessage {
+  role: 'user' | 'assistant'
+  text: string
+}
+
+export interface AgentPromptOptimizeInput {
+  prompt: string
+  context?: AgentPromptOptimizeContextMessage[]
+  providerConfig: AgentProviderConfig
 }
 
 /** 提问范围：全局 / 限定单个会话（@ 某联系人或群时收窄）。 */
@@ -151,6 +163,8 @@ export interface AgentRunInput {
   codeWorkspace?: CodeWorkspaceRef | null
   /** DeepSeek 这类前缀 KV cache provider：本轮动态上下文已作为隐藏 system 历史消息插入。 */
   turnContextMode?: 'tail' | 'history'
+  /** 会话 Canvas 上下文（主进程校验归属后注入）；存在时挂载 canvas_* 工具。 */
+  canvasContext?: AgentCanvasRunContext
 }
 
 export interface AgentUploadedMediaItem {

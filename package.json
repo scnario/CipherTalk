@@ -1,6 +1,6 @@
 {
   "name": "ciphertalk",
-  "version": "2026.7.16",
+  "version": "2026.7.19",
   "description": "密语 - 微信聊天记录查看工具",
   "author": "ILoveBingLu",
   "license": "CC-BY-NC-SA-4.0",
@@ -58,6 +58,7 @@
     "@heroui/react": "^3.1.0",
     "@heroui/styles": "^3.1.0",
     "@internationalized/date": "^3.12.2",
+    "@lottiefiles/dotlottie-react": "^0.19.10",
     "@modelcontextprotocol/sdk": "^1.27.1",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/exporter-trace-otlp-http": "^0.220.0",

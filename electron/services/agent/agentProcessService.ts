@@ -12,7 +12,7 @@ import { getAppPath, isElectronPackaged } from '../runtimePaths'
 import { getElectronWorkerEnv } from '../workerEnvironment'
 import { codeWorkspaceService } from './codeWorkspaceService'
 import type { CodeWorkspaceToolCall } from './codeWorkspaceTypes'
-import type { AgentProgressEvent, AgentProviderConfig, AgentRunInput } from './types'
+import type { AgentProgressEvent, AgentPromptOptimizeInput, AgentProviderConfig, AgentRunInput } from './types'
 
 const UTILITY_FILE = 'aiAgentUtilityProcess.js'
 const RESTART_DELAY_MS = 2000
@@ -131,6 +131,12 @@ export class AgentProcessService {
   async generateTitle(input: { firstMessage: string; providerConfig: AgentProviderConfig }): Promise<string> {
     const result = await this.call<{ title: string }>('generateTitle', input)
     return result.title
+  }
+
+  /** 提示词优化：子进程内单次 generateText，近期对话仅用于消解草稿中的指代。 */
+  async optimizePrompt(input: AgentPromptOptimizeInput): Promise<string> {
+    const result = await this.call<{ text: string }>('optimizePrompt', input)
+    return result.text
   }
 
   /** 聊天回复建议：子进程内单次 generateText（可带图/带检索工具），返回建议 + 附图诊断信息。 */
