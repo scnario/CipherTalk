@@ -92,3 +92,4 @@ release-verify/
 # 本地插件开发工作区（制作/调试插件用，不纳入版本库）
 plugin-workspace/
 MomentsBridge/
+CipherTalk-Tauri-Lite/

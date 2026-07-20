@@ -167,11 +167,21 @@ function Sidebar({ autoCollapse = false }: { autoCollapse?: boolean }) {
           collapsed ? 'h-12! w-12! min-w-12! justify-center p-0' : 'h-12! w-full justify-start gap-2 px-3'
         )}
       >
-        <span className="flex w-6 shrink-0 items-center justify-center">{item.icon}</span>
         {collapsed ? (
-          <span className="sr-only">{item.label}</span>
+          <>
+            <Tooltip delay={0}>
+              <Tooltip.Trigger aria-label={item.label}>
+                <span className="flex w-6 shrink-0 items-center justify-center">{item.icon}</span>
+              </Tooltip.Trigger>
+              <Tooltip.Content placement="right">{item.label}</Tooltip.Content>
+            </Tooltip>
+            <span className="sr-only">{item.label}</span>
+          </>
         ) : (
-          <span className="truncate text-base font-semibold">{item.label}</span>
+          <>
+            <span className="flex w-6 shrink-0 items-center justify-center">{item.icon}</span>
+            <span className="truncate text-base font-semibold">{item.label}</span>
+          </>
         )}
         <Tabs.Indicator />
       </Tabs.Tab>
@@ -215,15 +225,27 @@ function Sidebar({ autoCollapse = false }: { autoCollapse?: boolean }) {
         } as CSSProperties}
       />
 
-      {/* 顶部品牌区：logo + 名称，归属侧边栏内容区 */}
+      {/* 顶部用户区：头像 + 软件名 + 用户名 */}
       <div
-        className={cn('flex shrink-0 items-center gap-2 overflow-hidden px-6 pb-2', collapsed && 'justify-center')}
+        className={cn('flex shrink-0 items-center gap-2.5 overflow-hidden px-6 pb-2', collapsed && 'justify-center')}
         style={{
           WebkitAppRegion: 'no-drag',
         } as CSSProperties}
       >
-        <img src="./logo.png" alt={APP_DISPLAY_NAME} className="h-7 w-7 shrink-0 rounded" />
-        {!collapsed && <span className="truncate text-base font-semibold text-foreground">{APP_DISPLAY_NAME}</span>}
+        {collapsed ? (
+          <Tooltip delay={0}>
+            <Tooltip.Trigger aria-label={userDisplayName}>{profileAvatar}</Tooltip.Trigger>
+            <Tooltip.Content placement="right">{userDisplayName}</Tooltip.Content>
+          </Tooltip>
+        ) : (
+          <>
+            {profileAvatar}
+            <div className="min-w-0">
+              <div className="truncate text-sm font-semibold text-foreground">{userDisplayName}</div>
+              <div className="truncate text-xs text-muted">{APP_DISPLAY_NAME}</div>
+            </div>
+          </>
+        )}
       </div>
 
       {/* 主导航 */}
@@ -250,26 +272,9 @@ function Sidebar({ autoCollapse = false }: { autoCollapse?: boolean }) {
         </nav>
       </ScrollShadow>
 
-      {/* 底部：分隔线 + 用户 + 设置 + 折叠 */}
+      {/* 底部：分隔线 + 设置 + 折叠 */}
       <div className="shrink-0 px-2 pb-2">
         <Separator className="my-1.5" />
-
-        <div className={cn('flex items-center gap-2.5 overflow-hidden px-2 py-1.5', collapsed && 'justify-center')}>
-          {collapsed ? (
-            <Tooltip delay={0}>
-              <Tooltip.Trigger aria-label={userDisplayName}>{profileAvatar}</Tooltip.Trigger>
-              <Tooltip.Content placement="right">{userDisplayName}</Tooltip.Content>
-            </Tooltip>
-          ) : (
-            <>
-              {profileAvatar}
-              <div className="min-w-0">
-                <div className="truncate text-sm font-semibold text-foreground">{userDisplayName}</div>
-                <div className="truncate text-xs text-muted">当前用户</div>
-              </div>
-            </>
-          )}
-        </div>
 
         <div className={cn('flex flex-col gap-1', collapsed && 'items-center')}>
           {renderNavButton({
