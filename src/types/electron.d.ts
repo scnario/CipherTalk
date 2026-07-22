@@ -77,6 +77,40 @@ export interface CodexSubscriptionModel {
   defaultReasoningEffort?: string
 }
 
+export interface CodexAccount {
+  id: string
+  email?: string
+  planType?: string
+  active: boolean
+  addedAt: number
+}
+
+export interface CodexSubscriptionUsageWindow {
+  usedPercent: number
+  remainingPercent: number
+  windowDurationMins?: number
+  resetsAt?: number
+}
+
+export interface CodexSubscriptionRateLimit {
+  limitId: string
+  limitName?: string
+  primary?: CodexSubscriptionUsageWindow
+  secondary?: CodexSubscriptionUsageWindow
+}
+
+export interface CodexSubscriptionUsage {
+  rateLimits: CodexSubscriptionRateLimit[]
+  planType?: string
+  credits?: {
+    hasCredits?: boolean
+    unlimited?: boolean
+    balance?: string
+  }
+  resetCreditsAvailable?: number
+  fetchedAt: number
+}
+
 // ========= Agent Canvas（对话内可编辑产物） =========
 export type AgentCanvasKind = 'document' | 'code'
 export type AgentCanvasStatus = 'active' | 'archived'
@@ -1541,7 +1575,6 @@ export interface ElectronAPI {
       canvasContext?: { activeCanvasId?: string; activeRevision?: number } | null
     ) => Promise<{ success: boolean; error?: string }>
     abort: (runId: string) => Promise<{ success: boolean }>
-    resolveCodexToolApproval: (approvalId: string, approved: boolean) => Promise<{ success: boolean; handled: boolean; error?: string }>
     generateTitle: (firstMessage: string, modelConfig?: unknown) => Promise<{ success: boolean; title?: string; error?: string }>
     optimizePrompt: (
       prompt: string,
@@ -1743,7 +1776,12 @@ export interface ElectronAPI {
   }
   codexSubscription: {
     getStatus: () => Promise<CodexSubscriptionStatus>
+    getUsage: (forceRefresh?: boolean) => Promise<{ success: boolean; usage?: CodexSubscriptionUsage; error?: string }>
     login: () => Promise<{ success: boolean; loginId?: string; error?: string }>
+    importFromCodexCli: () => Promise<{ success: boolean; error?: string }>
+    listAccounts: () => Promise<{ success: boolean; accounts?: CodexAccount[]; error?: string }>
+    setActiveAccount: (id: string) => Promise<{ success: boolean; error?: string }>
+    removeAccount: (id: string) => Promise<{ success: boolean; error?: string }>
     logout: () => Promise<{ success: boolean; error?: string }>
     listModels: () => Promise<{ success: boolean; models?: CodexSubscriptionModel[]; error?: string }>
     onStatusChanged: (callback: (status: CodexSubscriptionStatus) => void) => () => void

@@ -191,8 +191,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     run: (runId: string, messages: unknown[], scope?: unknown, modelConfig?: unknown, conversationId?: number | null, planMode?: boolean, toolProfile?: unknown, codeWorkspace?: unknown, canvasContext?: unknown) =>
       ipcRenderer.invoke('agent:run', { runId, messages, scope, modelConfig, conversationId, planMode, toolProfile, codeWorkspace, canvasContext }) as Promise<{ success: boolean; error?: string }>,
     abort: (runId: string) => ipcRenderer.invoke('agent:abort', runId) as Promise<{ success: boolean }>,
-    resolveCodexToolApproval: (approvalId: string, approved: boolean) =>
-      ipcRenderer.invoke('agent:resolveCodexToolApproval', { approvalId, approved }) as Promise<{ success: boolean; handled: boolean; error?: string }>,
     generateTitle: (firstMessage: string, modelConfig?: unknown) =>
       ipcRenderer.invoke('agent:generateTitle', { firstMessage, modelConfig }) as Promise<{ success: boolean; title?: string; error?: string }>,
     optimizePrompt: (prompt: string, modelConfig?: unknown, context?: Array<{ role: 'user' | 'assistant'; text: string }>) =>
@@ -933,7 +931,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   codexSubscription: {
     getStatus: () => ipcRenderer.invoke('codexSubscription:getStatus'),
+    getUsage: (forceRefresh?: boolean) => ipcRenderer.invoke('codexSubscription:getUsage', forceRefresh),
     login: () => ipcRenderer.invoke('codexSubscription:login'),
+    importFromCodexCli: () => ipcRenderer.invoke('codexSubscription:importFromCodexCli'),
+    listAccounts: () => ipcRenderer.invoke('codexSubscription:listAccounts'),
+    setActiveAccount: (id: string) => ipcRenderer.invoke('codexSubscription:setActiveAccount', id),
+    removeAccount: (id: string) => ipcRenderer.invoke('codexSubscription:removeAccount', id),
     logout: () => ipcRenderer.invoke('codexSubscription:logout'),
     listModels: () => ipcRenderer.invoke('codexSubscription:listModels'),
     onStatusChanged: (callback: (status: unknown) => void): (() => void) => {

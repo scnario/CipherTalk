@@ -3,6 +3,7 @@ import { ArrowDownToLine, ArrowUpRightFromSquare, ArrowsRotateLeft, LogoGithub, 
 import type { UpdateDownloadProgressPayload } from '../../../types/electron'
 import type { UpdateInfo } from '../types'
 import { formatFileSize, formatSpeed } from '../utils'
+import { formatDisplayVersion } from '../../../lib/appVersion'
 
 interface AboutTabProps {
   appVersion: string
@@ -59,10 +60,10 @@ function AboutTab({
             <Alert.Content>
               <Alert.Title>
                 {isDownloading
-                  ? `正在下载 v${updateVersion || '新版本'}`
+                  ? `正在下载 ${updateVersion ? formatDisplayVersion(updateVersion) : '新版本'}`
                   : updateInfo.forceUpdate
                     ? '检测到强制更新'
-                    : `新版本 v${updateVersion || '...'} 可用`}
+                    : `新版本 ${updateVersion ? formatDisplayVersion(updateVersion) : 'v...'} 可用`}
               </Alert.Title>
               {(updateInfo.message || updateInfo.title || updateInfo.releaseNotes) && (
                 <Alert.Description>
@@ -130,7 +131,7 @@ function AboutTab({
                 密语 CipherTalk
               </Typography.Heading>
               <Chip size="sm" variant="soft">
-                <Chip.Label>v{appVersion || '...'}</Chip.Label>
+                <Chip.Label>{appVersion ? formatDisplayVersion(appVersion) : 'v...'}</Chip.Label>
               </Chip>
             </div>
             <Typography.Paragraph size="sm" color="muted" className="max-w-2xl">
@@ -165,7 +166,7 @@ function AboutTab({
         <dl className="grid gap-4 sm:grid-cols-3 lg:grid-cols-1">
           <div className="space-y-1">
             <dt className="text-xs text-muted">当前版本</dt>
-            <dd className="text-sm font-medium text-foreground">v{appVersion || '...'}</dd>
+            <dd className="text-sm font-medium text-foreground">{appVersion ? formatDisplayVersion(appVersion) : 'v...'}</dd>
           </div>
           <div className="space-y-1">
             <dt className="text-xs text-muted">更新通道</dt>
