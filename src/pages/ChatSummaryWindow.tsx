@@ -6,11 +6,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useChat } from '@ai-sdk/react'
-import { Button } from '@heroui/react'
-import { ArrowsRotateLeft } from '@gravity-ui/icons'
+import { ArrowsRotateLeft, Check, Copy, Volume } from '@gravity-ui/icons'
 import { Conversation, ConversationContent, ConversationScrollButton } from '@/components/ai-elements/conversation'
-import { Message, MessageContent, MessageResponse } from '@/components/ai-elements/message'
+import { Message, MessageAction, MessageActions, MessageContent, MessageResponse } from '@/components/ai-elements/message'
 import { Loader } from '@/components/ai-elements/loader'
+import { useTtsSpeaker } from '@/lib/ttsPlayer'
 import {
   PromptInput,
   PromptInputBody,
@@ -48,6 +48,17 @@ export default function ChatSummaryWindow() {
   const isGroup = sessionId.endsWith('@chatroom')
 
   const [progressText, setProgressText] = useState('')
+  // 标题栏头像：加载失败或没有头像时退回首字母
+  const [avatarUrl, setAvatarUrl] = useState('')
+  const [avatarFailed, setAvatarFailed] = useState(false)
+  useEffect(() => {
+    if (!sessionId) return
+    let cancelled = false
+    void window.electronAPI.chat.getSessionDetail(sessionId).then((res) => {
+      if (!cancelled && res.success && res.detail?.avatarUrl) setAvatarUrl(res.detail.avatarUrl)
+    }).catch(() => { /* 取不到头像用首字母兜底 */ })
+    return () => { cancelled = true }
+  }, [sessionId])
   const scope = useMemo<AgentScope>(() => ({ kind: 'session', sessionId, displayName }), [sessionId, displayName])
   const scopeRef = useRef(scope)
   scopeRef.current = scope
@@ -63,20 +74,60 @@ export default function ChatSummaryWindow() {
   const { messages, sendMessage, setMessages, status, stop, error } = useChat({ transport, experimental_throttle: 50 })
   const busy = status === 'submitted' || status === 'streaming'
 
+  // 消息操作条：复制/朗读/重新生成，悬停消息时显示（与 Agent 页一致）
+  const [copiedId, setCopiedId] = useState<string | null>(null)
+  const { speakingKey, speak: speakMessage, stop: stopSpeaking } = useTtsSpeaker()
+  useEffect(() => () => { stopSpeaking() }, [stopSpeaking])
+  const handleCopy = async (id: string, text: string) => {
+    if (!text || !navigator.clipboard?.writeText) return
+    await navigator.clipboard.writeText(text)
+    setCopiedId(id)
+    window.setTimeout(() => setCopiedId((current) => current === id ? null : current), 1600)
+  }
+
   const startSummary = () => {
     setMessages([])
     setProgressText('')
+    setCachedAt(0)
     void sendMessage({ parts: [{ type: 'text', text: buildSummaryPrompt(displayName, isGroup, range) }] })
   }
 
-  // 挂载即跑首轮；StrictMode 下 effect 会跑两次，用 ref 挡住
+  // 摘要缓存：命中就直接展示旧结果，不再烧一轮 token；生成时间显示在结果下方
+  const [cachedAt, setCachedAt] = useState(0)
+
+  // 挂载先查缓存，没有才跑；StrictMode 下 effect 会跑两次，用 ref 挡住
   const startedRef = useRef(false)
   useEffect(() => {
     if (startedRef.current || !sessionId) return
     startedRef.current = true
-    startSummary()
+    void window.electronAPI.agent.getChatSummary({ sessionId, range })
+      .then((res) => {
+        const cached = res.success ? res.summary : null
+        if (!cached?.content) {
+          startSummary()
+          return
+        }
+        // 还原成一轮完整对话，首条提示词照旧隐藏，后续追问能接着上下文
+        setMessages([
+          { id: 'cached-prompt', role: 'user', parts: [{ type: 'text', text: buildSummaryPrompt(displayName, isGroup, range) }] },
+          { id: 'cached-summary', role: 'assistant', parts: [{ type: 'text', text: cached.content }] },
+        ])
+        setCachedAt(cached.updatedAt)
+      })
+      .catch(() => startSummary())
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 只在挂载时跑一次
   }, [sessionId])
+
+  // 首轮摘要生成完就落盘（追问产生的后续消息不覆盖摘要）
+  useEffect(() => {
+    if (busy || cachedAt) return
+    const first = messages.find((message) => message.role === 'assistant')
+    const text = first ? textOf(first.parts as { type: string; text?: string }[]) : ''
+    if (!text) return
+    void window.electronAPI.agent.saveChatSummary({ sessionId, range, displayName, content: text })
+      .then(() => setCachedAt(Date.now()))
+      .catch(() => { /* 存不下不影响本次查看 */ })
+  }, [busy, cachedAt, messages, sessionId, range, displayName])
 
   const handleSubmit = (message: PromptInputMessage) => {
     const text = message.text?.trim()
@@ -92,6 +143,9 @@ export default function ChatSummaryWindow() {
     <div className="chat-summary-window">
       <div className="chat-summary-titlebar">
         <div className="chat-summary-title">
+          {avatarUrl && !avatarFailed
+            ? <img className="chat-summary-avatar" src={avatarUrl} alt={displayName} onError={() => setAvatarFailed(true)} />
+            : <span className="chat-summary-avatar chat-summary-avatar--fallback">{displayName.trim().slice(0, 1)}</span>}
           <strong>{displayName}</strong>
           <span className="chat-summary-range">{range}的聊天摘要</span>
         </div>
@@ -106,12 +160,41 @@ export default function ChatSummaryWindow() {
             if (isFirstPrompt) return null
             const text = textOf(message.parts as { type: string; text?: string }[])
             if (!text) return null
+            const speaking = speakingKey === message.id
             return (
               <Message key={message.id} from={message.role}>
                 <MessageContent>
                   {message.role === 'assistant'
                     ? <MessageResponse isStreaming={busy}>{text}</MessageResponse>
                     : text}
+                  {message.role === 'assistant' && !busy && (
+                    <div className="mt-2 transition-opacity pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
+                      <MessageActions className="shrink-0">
+                        <MessageAction
+                          label="复制"
+                          onClick={() => void handleCopy(message.id, text)}
+                          tooltip={copiedId === message.id ? '已复制' : '复制'}
+                        >
+                          {copiedId === message.id ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+                        </MessageAction>
+                        <MessageAction
+                          label={speaking ? '停止播放' : '播放'}
+                          onClick={() => { if (speaking) stopSpeaking(); else void speakMessage(message.id, text) }}
+                          tooltip={speaking ? '停止播放' : '播放'}
+                        >
+                          <Volume className={`size-3.5 ${speaking ? 'text-accent-foreground' : ''}`} />
+                        </MessageAction>
+                        <MessageAction label="重新生成" onClick={startSummary} tooltip="重新生成">
+                          <ArrowsRotateLeft className="size-3.5" />
+                        </MessageAction>
+                      </MessageActions>
+                      {cachedAt > 0 && message.id === 'cached-summary' && (
+                        <span className="chat-summary-cached-at">
+                          生成于 {new Date(cachedAt).toLocaleString('zh-CN', { hour12: false })}
+                        </span>
+                      )}
+                    </div>
+                  )}
                 </MessageContent>
               </Message>
             )
@@ -128,21 +211,14 @@ export default function ChatSummaryWindow() {
       </Conversation>
 
       <div className="chat-summary-footer">
-        <Button
-          size="sm"
-          variant="ghost"
-          isDisabled={busy}
-          onPress={startSummary}
-          className="chat-summary-regen"
+        <PromptInput
+          className="chat-summary-input w-full **:data-[slot=input-group]:border-border **:data-[slot=input-group]:bg-surface/55 **:data-[slot=input-group]:shadow-lg"
+          onSubmit={handleSubmit}
         >
-          <ArrowsRotateLeft width={15} height={15} />
-          重新生成
-        </Button>
-        <PromptInput className="chat-summary-input" onSubmit={handleSubmit}>
           <PromptInputBody>
-            <PromptInputTextarea placeholder="就这份摘要继续追问…" />
+            <PromptInputTextarea className="min-h-10 max-h-40 py-2 text-sm leading-5" placeholder="就这份摘要继续追问…" />
           </PromptInputBody>
-          <PromptInputFooter>
+          <PromptInputFooter className="items-center px-2.5 pt-1 pb-2">
             <span />
             <PromptInputSubmit status={status} onClick={busy ? () => void stop() : undefined} />
           </PromptInputFooter>

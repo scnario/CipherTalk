@@ -220,6 +220,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('agent:loadConversation', id) as Promise<{ success: boolean; conversation?: unknown; error?: string }>,
     createConversation: (payload: unknown) =>
       ipcRenderer.invoke('agent:createConversation', payload) as Promise<{ success: boolean; conversation?: unknown; error?: string }>,
+    // 聊天摘要缓存：同会话+时间范围只存最新一份
+    getChatSummary: (payload: { sessionId: string; range: string }) =>
+      ipcRenderer.invoke('agent:getChatSummary', payload) as Promise<{ success: boolean; summary?: unknown; error?: string }>,
+    saveChatSummary: (payload: { sessionId: string; range: string; displayName?: string; content: string }) =>
+      ipcRenderer.invoke('agent:saveChatSummary', payload) as Promise<{ success: boolean; error?: string }>,
     deleteConversation: (idOrPayload: number | { id?: number; originClientId?: string | null }) =>
       ipcRenderer.invoke('agent:deleteConversation', idOrPayload) as Promise<{ success: boolean; error?: string }>,
     deleteConversationsByScope: (scope: unknown) =>
@@ -981,6 +986,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     createPaymentOrder: (input: RelayOneCreatePaymentOrderInput) => ipcRenderer.invoke('relayOne:createPaymentOrder', input) as Promise<RelayOneIpcResult<RelayOnePaymentOrder>>,
     getPaymentOrder: (orderId: string) => ipcRenderer.invoke('relayOne:getPaymentOrder', orderId) as Promise<RelayOneIpcResult<RelayOnePaymentOrder>>,
     cancelPaymentOrder: (orderId: string) => ipcRenderer.invoke('relayOne:cancelPaymentOrder', orderId) as Promise<RelayOneIpcResult<RelayOnePaymentOrder>>,
+    openPaymentWindow: (url: string) => ipcRenderer.invoke('relayOne:openPaymentWindow', url) as Promise<RelayOneIpcResult<void>>,
+    closePaymentWindow: () => ipcRenderer.invoke('relayOne:closePaymentWindow') as Promise<RelayOneIpcResult<void>>,
     onStatusChanged: (callback: (status: RelayOneStatus) => void): (() => void) => {
       const listener = (_event: unknown, status: RelayOneStatus) => callback(status)
       ipcRenderer.on('relayOne:statusChanged', listener)
