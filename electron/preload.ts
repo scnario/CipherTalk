@@ -18,6 +18,7 @@ import type {
   RelayOneUser
 } from '../src/types/relayOne'
 import type { AgentReasoningEffort } from './services/agent/types'
+import type { RemoteControlInfo } from './services/remote/remoteControl'
 
 function getMcpLaunchConfigSafe(): Promise<{
   command: string
@@ -166,6 +167,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
         ipcRenderer.on('deviceConnect:wechat:scanState', listener)
         return () => { ipcRenderer.removeListener('deviceConnect:wechat:scanState', listener) }
       },
+    },
+    remote: {
+      getInfo: () => ipcRenderer.invoke('deviceConnect:remote:getInfo') as Promise<RemoteControlInfo>,
+      setEnabled: (enabled: boolean) => ipcRenderer.invoke('deviceConnect:remote:setEnabled', enabled) as Promise<{ success: boolean; error?: string; info?: RemoteControlInfo }>,
+      rotatePairing: () => ipcRenderer.invoke('deviceConnect:remote:rotatePairing') as Promise<{ success: boolean; info: RemoteControlInfo }>,
     },
   },
 
@@ -388,7 +394,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     deleteDiary: (date: string) =>
       ipcRenderer.invoke('memory:deleteDiary', date) as Promise<{ success: boolean; error?: string }>,
     summarizeTodayDiary: () =>
-      ipcRenderer.invoke('memory:summarizeTodayDiary') as Promise<{ success: boolean; alreadyExists?: boolean; diary?: unknown; error?: string }>,
+      ipcRenderer.invoke('memory:summarizeTodayDiary') as Promise<{ success: boolean; diary?: unknown; error?: string }>,
     create: (payload: {
       memoryUid?: string
       sourceType?: string
@@ -846,6 +852,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // 朋友圈
   sns: {
+    getCover: () => ipcRenderer.invoke('sns:getCover'),
     getTimeline: (limit?: number, offset?: number, usernames?: string[], keyword?: string, startTime?: number, endTime?: number) =>
       ipcRenderer.invoke('sns:getTimeline', limit || 20, offset || 0, usernames, keyword, startTime, endTime),
     proxyImage: (params: { url: string; key?: string | number }) =>

@@ -24,6 +24,7 @@ import type {
   RelayOneUser
 } from './relayOne'
 import type { AgentReasoningEffort } from '../features/aiagent/transport/ipcChatTransport'
+import type { RemoteControlInfo } from '../../electron/services/remote/remoteControl'
 
 /** 全自动回复队列的状态推送，与 electron/services/autoReplyService.ts 的 AutoSendStatus 对应。 */
 export type ReplyTileAutoStatus =
@@ -760,6 +761,11 @@ export interface ElectronAPI {
       onQrcode: (callback: (payload: { qrcodeImage: string }) => void) => () => void
       onScanState: (callback: (payload: { state: 'scaned' | 'failed'; error?: string }) => void) => () => void
     }
+    remote: {
+      getInfo: () => Promise<RemoteControlInfo>
+      setEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string; info?: RemoteControlInfo }>
+      rotatePairing: () => Promise<{ success: boolean; info: RemoteControlInfo }>
+    }
   }
   accounts: {
     list: () => Promise<AccountProfile[]>
@@ -1280,6 +1286,11 @@ export interface ElectronAPI {
   }
   // 朋友圈相关
   sns: {
+    getCover: () => Promise<{
+      success: boolean
+      dataUrl?: string
+      error?: string
+    }>
     getTimeline: (limit?: number, offset?: number, usernames?: string[], keyword?: string, startTime?: number, endTime?: number) => Promise<{
       success: boolean
       timeline?: Array<{
@@ -1726,7 +1737,7 @@ export interface ElectronAPI {
     deleteBankNote: (kind: MemoryBankNoteKind, fileName: string) => Promise<{ success: boolean; error?: string }>
     readDiary: (date: string) => Promise<{ success: boolean; diary?: MemoryDiaryEntryInfo; error?: string }>
     deleteDiary: (date: string) => Promise<{ success: boolean; error?: string }>
-    summarizeTodayDiary: () => Promise<{ success: boolean; alreadyExists?: boolean; diary?: MemoryDiaryEntryInfo; error?: string }>
+    summarizeTodayDiary: () => Promise<{ success: boolean; diary?: MemoryDiaryEntryInfo; error?: string }>
     create: (payload: { memoryUid?: string; sourceType?: AgentMemorySourceType; content?: string; title?: string; importance?: number; confidence?: number; tags?: string[] }) => Promise<{ success: boolean; item?: AgentMemoryItem; error?: string }>
     delete: (id: number) => Promise<{ success: boolean; error?: string }>
     update: (payload: { id: number; sourceType?: AgentMemorySourceType; content?: string; importance?: number; confidence?: number; tags?: string[] }) => Promise<{ success: boolean; item?: AgentMemoryItem; error?: string }>
