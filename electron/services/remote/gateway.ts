@@ -28,12 +28,30 @@ type GatewayLogger = {
   error(category: string, message: string, data?: any): void
 }
 
-const STREAM_METHODS = new Set(['agent:run'])
+export type DeviceAuthResult = {
+  ok: boolean
+  deviceToken?: string
+  deviceName?: string
+  /** 'revoked' 已被吊销 | 'pairing-closed' 未在配对状态 */
+  reason?: string
+}
+
+export type DeviceAuthorizer = (input: { token?: string; name?: string }) => DeviceAuthResult
+
+const STREAM_METHODS = new Set(['agent:run', 'clone:chat'])
 
 class RemoteGatewayService {
   private server: http.Server | null = null
   private readonly connections = new Set<Socket>()
   private logger: GatewayLogger | null = null
+  private remoteConnected = false
+  private connectionListener: ((connected: boolean) => void) | null = null
+  /** 桥接页持久化证书的 DTLS 指纹，进二维码供手机端钉扎，防信令服务器中间人 */
+  private dtlsFingerprint = ''
+  /** 设备授权回调：由 remoteControl 注入（需要读写 config，gateway 本身不碰 electron） */
+  private deviceAuthorizer: DeviceAuthorizer | null = null
+  /** 桥接页实际收集到的候选类型，用来诊断「局域网能连、流量连不上」 */
+  private candidateKinds: string[] = []
   private startedAt = 0
   private lastError = ''
   private settings: GatewaySettings = {
@@ -46,12 +64,42 @@ class RemoteGatewayService {
     this.logger = logger
   }
 
+  setConnectionListener(listener: ((connected: boolean) => void) | null): void {
+    this.connectionListener = listener
+  }
+
   applySettings(next: Partial<GatewaySettings>): void {
     this.settings = { ...this.settings, ...next }
   }
 
   isRunning(): boolean {
     return Boolean(this.server)
+  }
+
+  isRemoteConnected(): boolean {
+    return this.remoteConnected
+  }
+
+  getDtlsFingerprint(): string {
+    return this.dtlsFingerprint
+  }
+
+  setDtlsFingerprint(fingerprint: string): void {
+    this.dtlsFingerprint = fingerprint
+  }
+
+  setDeviceAuthorizer(authorizer: DeviceAuthorizer | null): void {
+    this.deviceAuthorizer = authorizer
+  }
+
+  getCandidateKinds(): string[] {
+    return this.candidateKinds
+  }
+
+  setRemoteConnected(connected: boolean): void {
+    if (this.remoteConnected === connected) return
+    this.remoteConnected = connected
+    this.connectionListener?.(connected)
   }
 
   /** 局域网访问地址（含 token 的测试页 URL，供控制台/未来二维码使用）。 */
@@ -69,6 +117,7 @@ class RemoteGatewayService {
   getStatus() {
     return {
       running: this.isRunning(),
+      connected: this.remoteConnected,
       port: this.settings.port,
       startedAt: this.startedAt,
       tokenConfigured: Boolean(this.settings.token),
@@ -106,6 +155,7 @@ class RemoteGatewayService {
 
       server.listen(this.settings.port, this.settings.host, () => {
         this.server = server
+        this.setRemoteConnected(false)
         this.startedAt = Date.now()
         this.lastError = ''
         this.logger?.info('RemoteGateway', '远程网关已启动', { port: this.settings.port })
@@ -115,6 +165,7 @@ class RemoteGatewayService {
   }
 
   async stop(): Promise<void> {
+    this.setRemoteConnected(false)
     if (!this.server) return
     const currentServer = this.server
     this.server = null
@@ -182,6 +233,41 @@ class RemoteGatewayService {
 
     if (method === 'GET' && url.pathname === '/status') {
       this.sendJson(res, 200, { success: true, data: this.getStatus() })
+      return
+    }
+
+    if (method === 'POST' && url.pathname === '/bridge-status') {
+      const body = await this.readJson(req)
+      this.setRemoteConnected(body.connected === true)
+      this.sendJson(res, 200, { success: true })
+      return
+    }
+
+    if (method === 'POST' && url.pathname === '/device-auth') {
+      const body = await this.readJson(req)
+      const result = this.deviceAuthorizer
+        ? this.deviceAuthorizer({ token: String(body.token || ''), name: String(body.name || '') })
+        : { ok: false, reason: 'unavailable' }
+      if (!result.ok) {
+        this.logger?.warn('RemoteGateway', '手机设备鉴权被拒', { reason: result.reason })
+      }
+      this.sendJson(res, 200, result)
+      return
+    }
+
+    if (method === 'POST' && url.pathname === '/bridge-candidates') {
+      const body = await this.readJson(req)
+      this.candidateKinds = Array.isArray(body.kinds) ? body.kinds.map(String) : []
+      this.logger?.info('RemoteGateway', '桥接页候选地址', { kinds: this.candidateKinds })
+      this.sendJson(res, 200, { success: true })
+      return
+    }
+
+    if (method === 'POST' && url.pathname === '/bridge-fingerprint') {
+      const body = await this.readJson(req)
+      this.setDtlsFingerprint(String(body.fingerprint || ''))
+      this.logger?.info('RemoteGateway', '桥接页上报 DTLS 指纹', { hasFingerprint: Boolean(body.fingerprint) })
+      this.sendJson(res, 200, { success: true })
       return
     }
 
@@ -393,11 +479,19 @@ const q = new URLSearchParams(location.search)
 const token = q.get('token') || ''
 const signalingUrl = q.get('signaling') || ''
 const room = q.get('room') || ''
-const ICE_SERVERS = [{ urls: 'stun:stun.miwifi.com:3478' }, { urls: 'stun:stun.l.google.com:19302' }]
+const ICE_SERVERS = [
+  // 顺序有讲究：cloudflare 是专用公共 STUN 且有 AAAA 记录，唯一能拿到 IPv6 映射；
+  // miwifi 只有 A 记录（IPv4 srflx）；谷歌那个国内不稳，放最后当兜底
+  { urls: 'stun:stun.cloudflare.com:3478' },
+  { urls: 'stun:stun.miwifi.com:3478' },
+  { urls: 'stun:stun.l.google.com:19302' },
+]
 const PART_SIZE = 16000
 
 let ws = null, pc = null, dc = null
 let pidSeq = 1
+let reportedConnected = false
+let authorized = false
 const pendingAborts = new Map()
 const partsBuf = new Map()
 
@@ -405,6 +499,151 @@ function log(msg) {
   const el = document.getElementById('log')
   el.textContent += new Date().toISOString().slice(11, 19) + ' ' + msg + '\\n'
   console.log('[bridge]', msg)
+}
+
+function reportConnected(connected) {
+  if (reportedConnected === connected) return
+  reportedConnected = connected
+  fetch('/bridge-status?token=' + encodeURIComponent(token), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ connected }),
+    keepalive: true
+  }).catch(() => {})
+}
+
+// ===== 候选地址自检 =====
+// 「局域网能连、流量连不上」几乎都出在这里：host 候选被 mDNS 换成 xxx.local，
+// 跨网解析不了，公网 IPv6 等于从没通告过。把实际收集到的类型汇报上去，一眼看得见。
+let candidateKinds = new Set()
+
+function collectCandidate(line) {
+  // 不用正则：这段代码活在 TS 模板字符串里，正则里的 \S \d 会被模板吃掉退化成普通字母，
+  // 曾经因此永远匹配不上、候选一直是空。按空格切分没有这个坑。
+  const parts = String(line || '').split(' ')
+  const typIndex = parts.indexOf('typ')
+  if (typIndex < 5) return
+  const address = parts[4]
+  const type = parts[typIndex + 1] || ''
+  if (!address) return
+  if (address.endsWith('.local')) { candidateKinds.add('mDNS 隐藏（跨网不可用）'); return }
+  // 标出公网/内网：host 只代表「本机网卡上的地址」，IPv6 的 host 往往就是公网地址，
+  // 光看类型会把跨网直连误当成局域网
+  const v6 = address.includes(':')
+  const low = address.toLowerCase()
+  let priv
+  if (v6) {
+    priv = low.startsWith('fe80') || low.startsWith('fc') || low.startsWith('fd') || low === '::1'
+  } else {
+    const seg = address.split('.')
+    const a = Number(seg[0]), b = Number(seg[1])
+    priv = a === 10 || a === 127 || (a === 192 && b === 168) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31)
+  }
+  candidateKinds.add((v6 ? 'IPv6' : 'IPv4') + ' ' + (priv ? '内网' : '公网') + ' ' + type + ' ' + address)
+}
+
+function reportCandidates() {
+  const kinds = Array.from(candidateKinds)
+  log('本机候选: ' + (kinds.join('、') || '无'))
+  fetch('/bridge-candidates?token=' + encodeURIComponent(token), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ kinds })
+  }).catch(() => {})
+}
+
+// ===== 持久化 DTLS 证书 =====
+// WebRTC 默认每个 PeerConnection 生成新自签证书，指纹每次都变，没法钉扎。
+// 这里把证书存进 IndexedDB 复用，指纹才稳定，才能写进二维码让手机端比对。
+let localCert = null
+
+function idbRequest(mode, run) {
+  return new Promise((resolve, reject) => {
+    const open = indexedDB.open('ct-remote-bridge', 1)
+    open.onupgradeneeded = () => { open.result.createObjectStore('kv') }
+    open.onerror = () => reject(open.error)
+    open.onsuccess = () => {
+      const db = open.result
+      const req = run(db.transaction('kv', mode).objectStore('kv'))
+      req.onsuccess = () => resolve(req.result)
+      req.onerror = () => reject(req.error)
+    }
+  })
+}
+
+async function loadOrCreateCert() {
+  let cert = null
+  try { cert = await idbRequest('readonly', (s) => s.get('cert')) } catch {}
+  // 证书临期（<7 天）也要换，否则连接会在中途开始失败
+  const expiringSoon = cert && typeof cert.expires === 'number' && cert.expires < Date.now() + 7 * 24 * 3600 * 1000
+  if (!cert || expiringSoon) {
+    if (expiringSoon) log('证书临期，重新生成（手机需重新扫码配对）')
+    cert = await RTCPeerConnection.generateCertificate({
+      name: 'ECDSA',
+      namedCurve: 'P-256',
+      expires: 10 * 365 * 24 * 3600 * 1000,
+    })
+    try { await idbRequest('readwrite', (s) => s.put(cert, 'cert')) } catch (e) { log('证书持久化失败: ' + e) }
+  }
+  return cert
+}
+
+async function certFingerprint(cert) {
+  if (typeof cert.getFingerprints === 'function') {
+    const list = cert.getFingerprints() || []
+    const sha256 = list.find((f) => f.algorithm === 'sha-256') || list[0]
+    if (sha256 && sha256.value) return String(sha256.value).toUpperCase()
+  }
+  // 兜底：拿证书造个临时 offer，从 SDP 里抠指纹
+  const probe = new RTCPeerConnection({ certificates: [cert] })
+  try {
+    probe.createDataChannel('probe')
+    const offer = await probe.createOffer()
+    const m = /a=fingerprint:sha-256 ([0-9A-Fa-f:]+)/.exec(offer.sdp || '')
+    return m ? m[1].toUpperCase() : ''
+  } finally {
+    try { probe.close() } catch {}
+  }
+}
+
+/**
+ * 启动就自测一次候选地址：原先只有手机发来 offer 时才收集，
+ * 而用户看二维码配对的时候恰恰还没有手机连过，界面上永远是空的。
+ */
+async function probeCandidates() {
+  const probe = new RTCPeerConnection({
+    iceServers: ICE_SERVERS,
+    certificates: localCert ? [localCert] : undefined,
+  })
+  try {
+    probe.createDataChannel('probe')
+    probe.onicecandidate = (e) => {
+      if (e.candidate) collectCandidate(e.candidate.candidate || '')
+    }
+    await probe.setLocalDescription(await probe.createOffer())
+    // 等收集完成，最多 6 秒（STUN 不通时会一直等）
+    await new Promise((resolve) => {
+      const done = () => resolve(undefined)
+      const timer = setTimeout(done, 6000)
+      probe.onicegatheringstatechange = () => {
+        if (probe.iceGatheringState === 'complete') { clearTimeout(timer); done() }
+      }
+    })
+    reportCandidates()
+  } finally {
+    try { probe.close() } catch {}
+  }
+}
+
+async function initCert() {
+  localCert = await loadOrCreateCert()
+  const fingerprint = await certFingerprint(localCert)
+  log('DTLS 指纹: ' + fingerprint)
+  await fetch('/bridge-fingerprint?token=' + encodeURIComponent(token), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fingerprint })
+  }).catch(() => {})
 }
 
 function connectSignaling() {
@@ -425,19 +664,52 @@ function connectSignaling() {
 
 async function onOffer(msg) {
   log('收到 offer，建立新 PeerConnection')
+  candidateKinds = new Set()
   if (pc) { try { pc.close() } catch {} abortAll() }
-  pc = new RTCPeerConnection({ iceServers: ICE_SERVERS })
-  pc.onicecandidate = (e) => { if (e.candidate && ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'candidate', candidate: e.candidate })) }
-  pc.onconnectionstatechange = () => log('RTC 状态: ' + pc.connectionState)
-  pc.ondatachannel = (e) => {
-    dc = e.channel
-    dc.onopen = () => log('DataChannel 已打开')
-    dc.onclose = () => { log('DataChannel 关闭，中止在途请求'); abortAll() }
-    dc.onmessage = (ev) => onFrameRaw(String(ev.data))
+  reportConnected(false)
+  const nextPc = new RTCPeerConnection({
+    iceServers: ICE_SERVERS,
+    certificates: localCert ? [localCert] : undefined,
+  })
+  pc = nextPc
+  nextPc.onicecandidate = (e) => {
+    if (!e.candidate) { reportCandidates(); return }
+    collectCandidate(e.candidate.candidate || '')
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'candidate', candidate: e.candidate }))
   }
-  await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp })
-  const answer = await pc.createAnswer()
-  await pc.setLocalDescription(answer)
+  nextPc.onconnectionstatechange = () => {
+    if (pc !== nextPc) return
+    log('RTC 状态: ' + nextPc.connectionState)
+    if (nextPc.connectionState === 'connected' && dc?.readyState === 'open') {
+      reportConnected(true)
+    } else if (nextPc.connectionState === 'failed' || nextPc.connectionState === 'disconnected' || nextPc.connectionState === 'closed') {
+      reportConnected(false)
+    }
+  }
+  nextPc.ondatachannel = (e) => {
+    if (pc !== nextPc) return
+    const nextDc = e.channel
+    dc = nextDc
+    nextDc.onopen = () => {
+      if (dc !== nextDc) return
+      log('DataChannel 已打开，等待设备握手')
+      authorized = false
+      reportConnected(true)
+    }
+    nextDc.onclose = () => {
+      if (dc !== nextDc) return
+      dc = null
+      log('DataChannel 关闭，中止在途请求')
+      reportConnected(false)
+      abortAll()
+    }
+    nextDc.onmessage = (ev) => { if (dc === nextDc) onFrameRaw(String(ev.data)) }
+  }
+  await nextPc.setRemoteDescription({ type: 'offer', sdp: msg.sdp })
+  if (pc !== nextPc) return
+  const answer = await nextPc.createAnswer()
+  await nextPc.setLocalDescription(answer)
+  if (pc !== nextPc) return
   ws.send(JSON.stringify({ type: 'answer', sdp: answer.sdp }))
 }
 
@@ -468,7 +740,29 @@ function onFrameRaw(raw) {
     partsBuf.delete(frame.pid)
     try { frame = JSON.parse(buf.parts.join('')) } catch { return }
   }
-  if (frame.t === 'req') void handleReq(frame)
+  if (frame.t === 'hello') { void handleHello(frame); return }
+  // 未通过设备鉴权前不转发任何请求：手机只有握手成功才算配对设备
+  if (frame.t === 'req') {
+    if (!authorized) { sendFrame({ t: 'res', id: frame.id, data: { success: false, error: '设备未授权' } }); return }
+    void handleReq(frame)
+  }
+}
+
+async function handleHello(frame) {
+  try {
+    const res = await fetch('/device-auth?token=' + encodeURIComponent(token), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: frame.deviceToken || '', name: frame.deviceName || '' })
+    })
+    const data = await res.json()
+    authorized = data.ok === true
+    log('设备鉴权' + (authorized ? '通过' : '被拒: ' + (data.reason || '')))
+    sendFrame({ t: 'helloAck', ok: authorized, deviceToken: data.deviceToken || '', reason: data.reason || '' })
+  } catch (e) {
+    authorized = false
+    sendFrame({ t: 'helloAck', ok: false, reason: String(e) })
+  }
 }
 
 async function handleReq(frame) {
@@ -514,8 +808,12 @@ async function handleReq(frame) {
 
 // 30s 心跳保活（CF Worker 侧配了 auto-response，不会唤醒 DO）
 setInterval(() => { if (ws && ws.readyState === 1) ws.send('{"t":"ping"}') }, 30000)
+window.addEventListener('beforeunload', () => reportConnected(false))
 
 log('桥接页启动 room=' + room)
-connectSignaling()
+// 证书就绪后再连信令：否则先到的 offer 会用临时证书应答，指纹对不上
+initCert()
+  .catch((e) => log('证书初始化失败: ' + e))
+  .then(() => { connectSignaling(); return probeCandidates().catch((e) => log('候选自测失败: ' + e)) })
 </script></body></html>
 `

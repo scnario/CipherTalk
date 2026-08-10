@@ -3,7 +3,13 @@ import type { MainProcessContext } from '../context'
 import { weixinBotService } from '../../services/deviceConnect/weixinBotService'
 import {
   getRemoteControlInfo,
+  hasPairingPassword,
+  setPairingPassword,
+  unlockPairing,
+  listRemoteDevices,
+  revokeRemoteDevice,
   rotatePairingId,
+  setPairingOpen,
   startRemoteControl,
   stopRemoteControl,
 } from '../../services/remote/remoteControl'
@@ -36,6 +42,32 @@ export function registerDeviceConnectHandlers(ctx: MainProcessContext): void {
 
   ipcMain.handle('deviceConnect:remote:rotatePairing', async () => {
     return { success: true, info: await rotatePairingId(ctx) }
+  })
+
+  ipcMain.handle('deviceConnect:remote:listDevices', () => ({ success: true, devices: listRemoteDevices(ctx) }))
+
+  ipcMain.handle('deviceConnect:remote:revokeDevice', (_event, deviceId: string) => ({
+    success: true,
+    devices: revokeRemoteDevice(ctx, String(deviceId || '')),
+  }))
+
+  // 配对窗口：二维码弹窗打开期间才允许新手机配对，否则被吊销的手机能立刻重新配一个
+  ipcMain.handle('deviceConnect:remote:setPairingOpen', (_event, open: boolean) => {
+    setPairingOpen(open === true)
+    return { success: true }
+  })
+
+  ipcMain.handle('deviceConnect:remote:hasPassword', () => ({ success: true, hasPassword: hasPairingPassword(ctx) }))
+
+  ipcMain.handle('deviceConnect:remote:setPassword', async (_event, payload: { password: string; currentPassword?: string }) => {
+    const result = setPairingPassword(ctx, String(payload?.password || ''), payload?.currentPassword)
+    if (!result.success) return result
+    return { success: true, info: await getRemoteControlInfo(ctx) }
+  })
+
+  ipcMain.handle('deviceConnect:remote:unlock', async (_event, password: string) => {
+    if (!unlockPairing(ctx, String(password || ''))) return { success: false, error: '密码不正确' }
+    return { success: true, info: await getRemoteControlInfo(ctx) }
   })
 
   ipcMain.handle('deviceConnect:wechat:getStatus', () => weixinBotService.getStatus())
