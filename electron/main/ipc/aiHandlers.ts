@@ -134,7 +134,7 @@ function stripHistoricalToolPartsForModel(messages: UIMessage[] = []): UIMessage
   const next = messages.map((message, index) => {
     if (index >= lastUserIndex || message.role !== 'assistant' || !Array.isArray((message as any).parts)) return message
     const parts = ((message as any).parts as any[]).filter((part) => {
-      const keep = !(part && typeof part.type === 'string' && part.type.startsWith('tool-'))
+      const keep = !isUiToolPart(part)
       if (!keep) changed = true
       return keep
     })
@@ -143,12 +143,17 @@ function stripHistoricalToolPartsForModel(messages: UIMessage[] = []): UIMessage
   return changed ? next : messages
 }
 
+function isUiToolPart(part: unknown): boolean {
+  const type = (part as { type?: unknown } | null)?.type
+  return typeof type === 'string' && (type === 'dynamic-tool' || type.startsWith('tool-'))
+}
+
 function countToolParts(messages: UIMessage[] = []): number {
   let count = 0
   for (const message of messages) {
     const parts = Array.isArray((message as any)?.parts) ? (message as any).parts as any[] : []
     for (const part of parts) {
-      if (part && typeof part.type === 'string' && part.type.startsWith('tool-')) count += 1
+      if (isUiToolPart(part)) count += 1
     }
   }
   return count
@@ -1135,6 +1140,48 @@ export function registerAiHandlers(ctx: MainProcessContext): void {
     ctx.getLogService()?.warn('AIAgent', '收到 AI Agent 取消请求', { runId })
     agentAborters.get(runId)?.abort()
     return { success: true }
+  })
+
+  // 手机遥控端用：桌面端 TTS 合成后把音频 base64 回传手机播放（一句话约 50-300KB，DataChannel 分片扛得住）
+  handleAgent('agent:ttsSpeak', async (_e, payload: { text?: string }) => {
+    try {
+      const { synthesizeSpeech } = await import('../../services/ai/ttsService')
+      return await synthesizeSpeech(String(payload?.text || ''), { useCache: true })
+    } catch (e) {
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  })
+
+  // 手机遥控端用：列出已配置的 AI 服务商及各自的模型，供右上角切换（覆盖走 agent:run 的 modelConfig）
+  handleAgent('agent:listProviders', async () => {
+    try {
+      const config = ctx.getConfigService()
+      if (!config) return { success: false, error: '配置服务不可用' }
+      const { getProviderDefinitions, CODEX_SUBSCRIPTION_PROVIDER_ID } = await import('../../services/ai/providers/catalog')
+      const configs = config.getAllAIProviderConfigs() || {}
+      const current = config.getAICurrentProvider()
+      const definitions = await getProviderDefinitions()
+      const providers = definitions
+        .filter((def) => def.id === current
+          || def.id === CODEX_SUBSCRIPTION_PROVIDER_ID && Boolean(configs[def.id])
+          || Boolean(configs[def.id]?.apiKey))
+        .map((def) => {
+          const providerConfig = configs[def.id] as (typeof configs[string] & { reasoningEffort?: string }) | undefined
+          const models = def.modelDetails?.map((item) => item.id) || def.models || []
+          const configuredModel = providerConfig?.model || ''
+          return {
+            id: def.id,
+            // displayName 才是桌面端设置页显示的名字（如「RelayOne（官方推荐）」）
+            name: def.displayName || def.name,
+            models: configuredModel && !models.includes(configuredModel) ? [configuredModel, ...models] : models,
+            currentModel: configuredModel || models[0] || '',
+            reasoningEffort: providerConfig?.reasoningEffort || null,
+          }
+        })
+      return { success: true, current, providers }
+    } catch (e) {
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
+    }
   })
 
   // ========= 嵌入模型（语义/向量检索）=========
