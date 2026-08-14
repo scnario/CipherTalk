@@ -247,7 +247,21 @@ interface ConfigSchema {
   // 消息提醒：开启了"新消息提醒"的私聊会话用户名列表（默认全关，空数组）
   notifySessions: string[]
   replyTileEnabled: boolean
-  replySuggestSessions: Record<string, { enabled?: boolean; tile?: boolean; style?: string; count?: number; deep?: boolean }>
+  replySuggestSessions: Record<string, { enabled?: boolean; tile?: boolean; style?: string; count?: number; deep?: boolean; autoSend?: boolean }>
+  /**
+   * Agent 页的模型预设：用户自己命名的一组配置（服务商 + 密钥 + 模型）。
+   * 一直只有渲染层通过通用 config IPC 读写，主进程侧没声明过——
+   * 手机遥控端要列出和桌面端同一份预设，这里补上类型。
+   */
+  aiConfigPresets: Array<{
+    id: string
+    name: string
+    provider: string
+    apiKey: string
+    model: string
+    baseURL?: string
+    protocol?: string
+  }>
   mcpEnabled: boolean
   mcpExposeMediaPaths: boolean
   mcpProxyPort: number
@@ -260,7 +274,7 @@ interface ConfigSchema {
   remoteSignalingUrl: string
   remotePairingId: string
   // 已配对手机：token 是长期凭据，吊销=从表里删掉；只在二维码弹窗打开时才允许新配对
-  remoteDevices: Array<{ id: string; name: string; token: string; pairedAt: number; lastSeenAt: number }>
+  remoteDevices: Array<{ id: string; name: string; token: string; pairedAt: number; lastSeenAt: number; version?: string }>
   // 查看配对二维码的密码，格式 scrypt$<saltHex>$<hashHex>。
   // 存哈希不存密文：只需要验证不需要还原，加密的话密钥也在本机、等于没锁
   remotePairingPasswordHash: string
@@ -468,6 +482,7 @@ const defaults: ConfigSchema = {
   notifySessions: [],
   replyTileEnabled: false,
   replySuggestSessions: {},
+  aiConfigPresets: [],
   mcpEnabled: false,
   mcpExposeMediaPaths: true,
   mcpProxyPort: 5032,

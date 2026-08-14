@@ -33,6 +33,7 @@ type RemoteDeviceSummary = {
   name: string
   pairedAt: number
   lastSeenAt: number
+  version?: string
 }
 
 /** 全自动回复队列的状态推送，与 electron/services/autoReplyService.ts 的 AutoSendStatus 对应。 */
@@ -690,6 +691,8 @@ export interface ElectronAPI {
     onImageListUpdate: (callback: (data: { imageList: ImageListItem[], currentIndex: number }) => void) => () => void
     setReplyTileEnabled: (enabled: boolean) => Promise<boolean>
     getReplyTileEnabled: () => Promise<boolean>
+    /** 全局开关被别处改了（例如手机遥控端）时的通知；返回取消订阅函数 */
+    onReplyTileEnabledChanged: (callback: (enabled: boolean) => void) => () => void
     replyTileReady: () => void
     replyTileRefresh: () => void
     replyTile: {

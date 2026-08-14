@@ -10,6 +10,7 @@ import { remoteGatewayService } from './gateway'
 import { registerRemoteCloneHandlers } from './cloneHandlers'
 import { registerRemoteWechatHandlers } from './wechatHandlers'
 import { registerRemoteVoiceHandlers } from './voiceHandlers'
+import { registerRemoteAiSettingsHandlers } from './aiSettingsHandlers'
 
 const DEFAULT_SIGNALING_URL = 'wss://ctapp.aiqji.com'
 
@@ -28,6 +29,8 @@ export type RemoteDevice = {
   token: string
   pairedAt: number
   lastSeenAt: number
+  /** 手机端 App 版本，握手时上报，格式与桌面端一致 */
+  version?: string
 }
 
 export function setPairingOpen(open: boolean): void {
@@ -105,7 +108,7 @@ export function revokeRemoteDevice(ctx: MainProcessContext, deviceId: string): A
 }
 
 /** 手机连上 DataChannel 后的第一道关：验令牌，或在配对窗口内发新令牌 */
-function authorizeDevice(ctx: MainProcessContext, input: { token?: string; name?: string }) {
+function authorizeDevice(ctx: MainProcessContext, input: { token?: string; name?: string; version?: string }) {
   const configService = ctx.getConfigService()
   if (!configService) return { ok: false, reason: 'unavailable' }
   const devices = [...(configService.get('remoteDevices') ?? [])]
@@ -116,9 +119,11 @@ function authorizeDevice(ctx: MainProcessContext, input: { token?: string; name?
     if (index < 0) return { ok: false, reason: 'revoked' }
     // 同时更新名字：手机上改了名要能同步过来，否则列表里永远是首次配对时的旧名
     const incomingName = String(input.name || '').trim().slice(0, 40)
+    const incomingVersion = String(input.version || '').trim().slice(0, 32)
     devices[index] = {
       ...devices[index],
       name: incomingName || devices[index].name,
+      version: incomingVersion || devices[index].version,
       lastSeenAt: Date.now(),
     }
     configService.set('remoteDevices', devices)
@@ -131,6 +136,7 @@ function authorizeDevice(ctx: MainProcessContext, input: { token?: string; name?
     id: randomBytes(8).toString('hex'),
     name: String(input.name || '').trim().slice(0, 40) || '手机',
     token: randomBytes(24).toString('hex'),
+    version: String(input.version || '').trim().slice(0, 32) || undefined,
     pairedAt: Date.now(),
     lastSeenAt: Date.now(),
   }
@@ -217,9 +223,13 @@ export async function startRemoteControl(ctx: MainProcessContext): Promise<{ suc
     configService.set('remotePairingId', pairingId)
   }
 
-  registerRemoteCloneHandlers(configService)
+  registerRemoteCloneHandlers(configService, {
+    setReplyTileEnabled: (enabled) => ctx.getWindowManager().setReplyTileEnabled(enabled),
+    broadcastConfigChange: (key, value) => ctx.broadcastToWindows('config:changed', { key, value }),
+  })
   registerRemoteWechatHandlers(configService)
   registerRemoteVoiceHandlers()
+  registerRemoteAiSettingsHandlers()
   remoteGatewayService.setLogger(ctx.getLogService())
   remoteGatewayService.setConnectionListener((connected) => {
     ctx.broadcastToWindows('deviceConnect:remote:status', { connected })

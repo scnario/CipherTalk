@@ -1,11 +1,14 @@
 import { useEffect, useState } from 'react'
 import { Button, Chip, Spinner, toast } from '@heroui/react'
+import { ArrowDownToLine, CirclePlay, FileText, QrCode } from '@gravity-ui/icons'
+import { formatDisplayVersion } from '../lib/appVersion'
 
 type RemoteDeviceSummary = {
   id: string
   name: string
   pairedAt: number
   lastSeenAt: number
+  version?: string
 }
 
 type RemoteInfo = {
@@ -25,6 +28,12 @@ type RemoteInfo = {
 }
 
 const PHONE_ICON_SRC = './logo.png'
+
+const APP_LINKS = [
+  { label: '手机端密语安装包', url: 'https://miyuapp.aiqji.com/CipherTalk.ipa', icon: ArrowDownToLine },
+  { label: 'ipa 签名安装教程', url: 'https://api.wnqapp.com/urlsss/video', icon: CirclePlay },
+  { label: '爱思助手签名安装教程', url: 'https://www.i4.cn/news_detail_38195.html', icon: FileText },
+]
 
 /**
  * 设备连接弹窗里的「手机遥控」卡片：开关网关 + 展示配对二维码。
@@ -175,6 +184,154 @@ export function RemotePhoneCard() {
   const connected = info?.connected === true
   // 绑定关系和「当前是否在线」是两回事：手机切后台会断连，绑定还在
   const bound = (info?.deviceCount ?? 0) > 0
+  // 二维码占掉一整屏高度，所以固定左右分栏：左二维码（未解锁时是占位），右其余内容
+  const showQr = running && info?.hasPassword === true && !info.locked
+
+  // 左栏 = 二维码模块：密码是拿到二维码的前置步骤，所以设/解锁密码也放这
+  const qrPane = (
+    <div className="flex w-52 flex-col items-center gap-2">
+      {showQr ? (
+        <div className="relative flex size-44 items-center justify-center rounded-xl bg-white">
+          {info?.qrImage
+            ? <img src={info.qrImage} alt="手机配对二维码" className="size-44 rounded-xl" />
+            : <Spinner />}
+        </div>
+      ) : (
+        <div className="flex size-44 flex-col items-center justify-center rounded-xl border border-dashed border-default-300 text-default-400">
+          <QrCode width={48} height={48} />
+        </div>
+      )}
+
+      {showQr ? (
+        <>
+          <p className="text-center text-xs text-muted">用密语手机 App 扫描二维码完成配对</p>
+          {!showCode && (
+            <Button size="sm" variant="ghost" onPress={() => setShowCode(true)}>
+              没法扫码？手动输入
+            </Button>
+          )}
+        </>
+      ) : running && !info?.hasPassword ? (
+        <div className="flex w-full flex-col gap-2 rounded-xl bg-default-100 p-3">
+          <p className="text-sm text-foreground">先设置一个查看密码</p>
+          <p className="text-xs text-muted">
+            之后要新增手机、查看配对二维码都需要它。密码只存哈希，忘了只能重设。
+          </p>
+          <input
+            type="password"
+            className="rounded-md border border-default-300 bg-background px-2 py-1.5 text-sm"
+            placeholder="设置密码（至少 4 位）"
+            value={pwInput}
+            onChange={(e) => setPwInput(e.target.value)}
+          />
+          <input
+            type="password"
+            className="rounded-md border border-default-300 bg-background px-2 py-1.5 text-sm"
+            placeholder="再输一次"
+            value={pwConfirm}
+            onChange={(e) => setPwConfirm(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') void submitPassword() }}
+          />
+          {pwError ? <p className="text-xs text-danger">{pwError}</p> : null}
+          <Button size="sm" isDisabled={busy} onPress={() => void submitPassword()}>保存密码</Button>
+        </div>
+      ) : running && info?.locked ? (
+        <div className="flex w-full flex-col gap-2 rounded-xl bg-default-100 p-3">
+          <p className="text-sm text-foreground">
+            已绑定 {info.deviceCount} 台手机{connected ? '，当前在线' : '，手机不在线时也保持绑定'}
+          </p>
+          <p className="text-xs text-muted">要新增手机或查看二维码，请输入查看密码</p>
+          <input
+            type="password"
+            className="rounded-md border border-default-300 bg-background px-2 py-1.5 text-sm"
+            placeholder="查看密码"
+            value={pwInput}
+            onChange={(e) => setPwInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') void submitUnlock() }}
+          />
+          {pwError ? <p className="text-xs text-danger">{pwError}</p> : null}
+          <Button size="sm" variant="tertiary" isDisabled={busy} onPress={() => void submitUnlock()}>
+            解锁查看二维码
+          </Button>
+        </div>
+      ) : (
+        <p className="text-center text-xs text-muted">开启后显示配对二维码</p>
+      )}
+    </div>
+  )
+
+  const rest = (
+    <>
+      {showQr && showCode && (
+        <div className="rounded-lg bg-default-100 p-3">
+          <div className="mb-1 flex items-center justify-between gap-2">
+            <p className="text-xs text-muted">配对码</p>
+            <Button size="sm" variant="ghost" onPress={() => void copy(info?.pairingId, '配对码')}>复制</Button>
+          </div>
+          <p className="mb-2 break-all font-mono text-xs text-foreground">{info?.pairingId}</p>
+          <div className="mb-1 flex items-center justify-between gap-2">
+            <p className="text-xs text-muted">身份指纹（必填，防信令服务器冒充）</p>
+            <Button size="sm" variant="ghost" onPress={() => void copy(info?.fingerprint, '身份指纹')}>复制</Button>
+          </div>
+          <p className="break-all font-mono text-xs text-foreground">{info?.fingerprint}</p>
+        </div>
+      )}
+
+      {running && devices.length > 0 && (
+        <div className="flex flex-col gap-1">
+          <p className="text-xs text-muted">已配对手机</p>
+          {devices.map((device) => (
+            <div key={device.id} className="flex items-center gap-2 rounded-lg bg-default-100 px-3 py-2">
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <p className="truncate text-sm text-foreground">{device.name}</p>
+                  {device.version && (
+                    <Chip size="sm" variant="soft">{formatDisplayVersion(device.version)}</Chip>
+                  )}
+                </div>
+                <p className="text-xs text-muted">
+                  最近连接 {device.lastSeenAt ? new Date(device.lastSeenAt).toLocaleString('zh-CN') : '—'}
+                </p>
+              </div>
+              <Button size="sm" variant="ghost" isDisabled={busy} onPress={() => void revoke(device)}>
+                吊销
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {running && info && info.candidateKinds.length > 0 && (
+        <div className="rounded-lg bg-default-100 px-3 py-2">
+          <p className="mb-1 text-xs text-muted">本机地址</p>
+          {info.candidateKinds.map((kind) => (
+            <p key={kind} className="break-all font-mono text-xs text-foreground">{kind}</p>
+          ))}
+          {!info.candidateKinds.some((k) => k.startsWith('IPv6')) && (
+            <p className="mt-1 text-xs text-warning">
+              没有 IPv6 地址，手机用流量可能连不上（本机或路由器没有公网 IPv6）
+            </p>
+          )}
+        </div>
+      )}
+
+      <div className="mt-auto flex gap-2">
+        <Button
+          variant={running ? 'tertiary' : 'primary'}
+          fullWidth
+          isDisabled={busy || !info}
+          onPress={toggle}
+        >
+          {running ? '关闭手机遥控' : '开启手机遥控'}
+        </Button>
+        {running && (
+          <Button variant="tertiary" isDisabled={busy} onPress={rotate}>
+            换配对码
+          </Button>
+        )}
+      </div>
+    </>
+  )
 
   return (
     <div className="flex flex-col gap-4">
@@ -202,130 +359,23 @@ export function RemotePhoneCard() {
         </div>
       </div>
 
-      {running && !info?.hasPassword && (
-        <div className="flex flex-col gap-2 rounded-lg bg-default-100 p-3">
-          <p className="text-sm text-foreground">先设置一个查看密码</p>
-          <p className="text-xs text-muted">
-            之后要新增手机、查看配对二维码都需要它。密码只存哈希，忘了只能重设。
-          </p>
-          <input
-            type="password"
-            className="rounded-md border border-default-300 bg-background px-2 py-1.5 text-sm"
-            placeholder="设置密码（至少 4 位）"
-            value={pwInput}
-            onChange={(e) => setPwInput(e.target.value)}
-          />
-          <input
-            type="password"
-            className="rounded-md border border-default-300 bg-background px-2 py-1.5 text-sm"
-            placeholder="再输一次"
-            value={pwConfirm}
-            onChange={(e) => setPwConfirm(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') void submitPassword() }}
-          />
-          {pwError ? <p className="text-xs text-danger">{pwError}</p> : null}
-          <Button size="sm" isDisabled={busy} onPress={() => void submitPassword()}>保存密码</Button>
-        </div>
-      )}
+      <div className="flex items-start gap-4">
+        <div className="shrink-0">{qrPane}</div>
+        <div className="flex min-w-0 flex-1 flex-col gap-3">{rest}</div>
+      </div>
 
-      {running && info?.locked && (
-        <div className="flex flex-col gap-2 rounded-lg bg-default-100 p-3">
-          <p className="text-sm text-foreground">
-            已绑定 {info.deviceCount} 台手机{connected ? '，当前在线' : '，手机不在线时也保持绑定'}
-          </p>
-          <p className="text-xs text-muted">要新增手机或查看二维码，请输入查看密码</p>
-          <input
-            type="password"
-            className="rounded-md border border-default-300 bg-background px-2 py-1.5 text-sm"
-            placeholder="查看密码"
-            value={pwInput}
-            onChange={(e) => setPwInput(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') void submitUnlock() }}
-          />
-          {pwError ? <p className="text-xs text-danger">{pwError}</p> : null}
-          <Button size="sm" variant="tertiary" isDisabled={busy} onPress={() => void submitUnlock()}>
-            解锁查看二维码
-          </Button>
-        </div>
-      )}
-
-      {running && info?.hasPassword && !info.locked && (
-        <div className="flex flex-col items-center gap-3 py-1">
-          <div className="relative flex size-60 items-center justify-center rounded-xl bg-white">
-            {info?.qrImage
-              ? <img src={info.qrImage} alt="手机配对二维码" className="size-60 rounded-xl" />
-              : <Spinner />}
-          </div>
-          <p className="text-sm text-muted">用密语手机 App 扫描二维码完成配对</p>
-
-          {showCode ? (
-            <div className="w-full rounded-lg bg-default-100 p-3">
-              <div className="mb-2 flex items-center justify-between gap-2">
-                <p className="text-xs text-muted">配对码</p>
-                <Button size="sm" variant="ghost" onPress={() => void copy(info?.pairingId, '配对码')}>复制</Button>
-              </div>
-              <p className="mb-3 break-all font-mono text-xs text-foreground">{info?.pairingId}</p>
-              <div className="mb-2 flex items-center justify-between gap-2">
-                <p className="text-xs text-muted">身份指纹（必填，防信令服务器冒充）</p>
-                <Button size="sm" variant="ghost" onPress={() => void copy(info?.fingerprint, '身份指纹')}>复制</Button>
-              </div>
-              <p className="break-all font-mono text-xs text-foreground">{info?.fingerprint}</p>
-            </div>
-          ) : (
-            <Button size="sm" variant="ghost" onPress={() => setShowCode(true)}>
-              没法扫码？手动输入
-            </Button>
-          )}
-        </div>
-      )}
-
-      {running && devices.length > 0 && (
-        <div className="flex flex-col gap-1">
-          <p className="text-xs text-muted">已配对手机</p>
-          {devices.map((device) => (
-            <div key={device.id} className="flex items-center gap-2 rounded-lg bg-default-100 px-3 py-2">
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-sm text-foreground">{device.name}</p>
-                <p className="text-xs text-muted">
-                  最近连接 {device.lastSeenAt ? new Date(device.lastSeenAt).toLocaleString('zh-CN') : '—'}
-                </p>
-              </div>
-              <Button size="sm" variant="ghost" isDisabled={busy} onPress={() => void revoke(device)}>
-                吊销
-              </Button>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {running && info && info.candidateKinds.length > 0 && (
-        <div className="rounded-lg bg-default-100 px-3 py-2">
-          <p className="mb-1 text-xs text-muted">本机地址</p>
-          {info.candidateKinds.map((kind) => (
-            <p key={kind} className="break-all font-mono text-xs text-foreground">{kind}</p>
-          ))}
-          {!info.candidateKinds.some((k) => k.startsWith('IPv6')) && (
-            <p className="mt-1 text-xs text-warning">
-              没有 IPv6 地址，手机用流量可能连不上（本机或路由器没有公网 IPv6）
-            </p>
-          )}
-        </div>
-      )}
-
-      <div className="flex gap-2">
-        <Button
-          variant={running ? 'tertiary' : 'primary'}
-          fullWidth
-          isDisabled={busy || !info}
-          onPress={toggle}
-        >
-          {running ? '关闭手机遥控' : '开启手机遥控'}
-        </Button>
-        {running && (
-          <Button variant="tertiary" isDisabled={busy} onPress={rotate}>
-            换配对码
-          </Button>
-        )}
+      <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-2 border-t border-default-200 pt-3 text-xs">
+        {APP_LINKS.map((link) => (
+          <button
+            key={link.url}
+            type="button"
+            className="flex items-center gap-1 text-accent hover:underline"
+            onClick={() => void window.electronAPI.shell.openExternal(link.url)}
+          >
+            <link.icon width={14} height={14} />
+            {link.label}
+          </button>
+        ))}
       </div>
     </div>
   )
