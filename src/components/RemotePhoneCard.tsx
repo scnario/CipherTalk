@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Button, Chip, Spinner, toast } from '@heroui/react'
 import { ArrowDownToLine, CirclePlay, FileText, QrCode } from '@gravity-ui/icons'
 import { formatDisplayVersion } from '../lib/appVersion'
+import { RemotePushDialog } from './RemotePushDialog'
 
 type RemoteDeviceSummary = {
   id: string
@@ -47,6 +48,7 @@ export function RemotePhoneCard() {
   const [pwInput, setPwInput] = useState('')
   const [pwConfirm, setPwConfirm] = useState('')
   const [pwError, setPwError] = useState('')
+  const [pushOpen, setPushOpen] = useState(false)
 
   // 卡片显示期间才允许新手机配对：关掉弹窗就关闸（同时后端重新上锁），
   // 被吊销的手机没法自己配回来
@@ -363,6 +365,13 @@ export function RemotePhoneCard() {
         <div className="shrink-0">{qrPane}</div>
         <div className="flex min-w-0 flex-1 flex-col gap-3">{rest}</div>
       </div>
+
+      {running && (
+        <Button variant="tertiary" fullWidth onPress={() => setPushOpen(true)}>
+          推送通知设置…
+        </Button>
+      )}
+      <RemotePushDialog isOpen={pushOpen} onClose={() => setPushOpen(false)} />
 
       <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-2 border-t border-default-200 pt-3 text-xs">
         {APP_LINKS.map((link) => (
