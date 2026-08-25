@@ -30,6 +30,7 @@ import { ArrowUpRight, ArrowsRotateLeft, Bulb, CircleCheck, CircleQuestion, Curl
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { getAIProviders, type AIModelInfo, type AIProviderInfo } from '../../types/ai'
+import { RELAYONE_DEFAULT_MODEL } from '../../types/relayOne'
 import * as configService from '../../services/config'
 import { cn } from '../../lib/utils'
 import { useSettingsStore } from '../settings/settingsStore'
@@ -512,10 +513,12 @@ function AISummarySettings({ showMessage }: AISummarySettingsProps) {
     setRemoteModels(result.models)
     setRemoteModelDetails(result.modelDetails || [])
     if (!relayOneConfig.model && result.models[0]) {
-      const nextConfig = { ...relayOneConfig, model: result.models[0] }
+      // 默认展示 gpt-5.6-sol，列表里没有才退回第一个
+      const defaultModel = result.models.find(item => item.toLowerCase() === RELAYONE_DEFAULT_MODEL.toLowerCase()) || result.models[0]
+      const nextConfig = { ...relayOneConfig, model: defaultModel }
       await configService.setAiProviderConfig('relayone', nextConfig)
       setProviderConfigs(prev => ({ ...prev, relayone: nextConfig }))
-      setField('aiModel', result.models[0])
+      setField('aiModel', defaultModel)
     }
   }
 
@@ -614,9 +617,9 @@ function AISummarySettings({ showMessage }: AISummarySettingsProps) {
     await configService.setAiProvider(normalizedProviderId)
   }
 
-  const handleRefreshModels = async () => {
+  const loadRemoteModels = async (notify: boolean) => {
     if (!canFetchProviderModelList(provider, baseURL, currentProvider)) {
-      showMessage('请先填写当前服务商所需的 API 配置', false)
+      if (notify) showMessage('请先填写当前服务商所需的 API 配置', false)
       return
     }
     setIsLoadingModels(true)
@@ -631,25 +634,47 @@ function AISummarySettings({ showMessage }: AISummarySettingsProps) {
       if (!result.success || !result.models?.length) {
         const error = result.error || '模型列表为空'
         setModelListError(error)
-        showMessage(error, false)
+        if (notify) showMessage(error, false)
         return
       }
       setRemoteModels(result.models)
       setRemoteModelDetails(result.modelDetails || [])
       const nextModelDetailsById = new Map((result.modelDetails || []).map(item => [item.id, item]))
       const availableModels = result.models.filter(item => !isDeprecatedModel(nextModelDetailsById.get(item)))
-      if (!availableModels.includes(model)) {
+      // 静默加载（展开下拉自动拉取）不能改掉用户手输的模型，只有主动刷新才纠正
+      if (!availableModels.includes(model) && (notify || !model.trim())) {
         setField('aiModel', availableModels[0] || result.models[0])
       }
-      showMessage('模型列表已刷新', true)
+      if (notify) showMessage('模型列表已刷新', true)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       setModelListError(message)
-      showMessage(`刷新模型失败: ${message}`, false)
+      if (notify) showMessage(`刷新模型失败: ${message}`, false)
     } finally {
       setIsLoadingModels(false)
     }
   }
+
+  const handleRefreshModels = () => loadRemoteModels(true)
+
+  // 配置就绪后静默预拉一次模型列表，让下拉一点开就有内容；同一份配置只自动尝试一次，失败后靠刷新按钮重试
+  const modelAutoFetchKeyRef = useRef('')
+  const maybeAutoLoadModels = () => {
+    if (isLoadingModels || remoteModels.length > 0) return
+    if (!canFetchProviderModelList(provider, baseURL, currentProvider)) return
+    // 没填密钥时请求必然失败，不白打（ollama 和可免密钥的服务商除外）
+    if (!apiKey.trim() && provider !== 'ollama' && !currentProvider?.optionalApiKey) return
+    const fetchKey = [provider, apiKey, baseURL, customProtocol].join('|')
+    if (modelAutoFetchKeyRef.current === fetchKey) return
+    modelAutoFetchKeyRef.current = fetchKey
+    void loadRemoteModels(false)
+  }
+
+  useEffect(() => {
+    maybeAutoLoadModels()
+    // maybeAutoLoadModels 内部已按配置指纹去重，这里只需在配置变化时触发
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [provider, apiKey, baseURL, customProtocol, providers.length])
 
   useEffect(() => {
     if (isCodexSubscription && codexAuthenticated) void handleRefreshModels()
@@ -742,7 +767,7 @@ function AISummarySettings({ showMessage }: AISummarySettingsProps) {
 
   const handleTestConnection = async () => {
     if (provider !== 'ollama' && !isCodexSubscription && !apiKey.trim()) {
-      showMessage('请先填写 API 密钥', false)
+      showMessage(provider === 'relayone' ? '请先登录 RelayOne 账户，登录后自动配置密钥' : '请先填写 API 密钥', false)
       return
     }
     if (currentProvider?.allowCustomBaseURL && !baseURL.trim()) {
@@ -941,16 +966,16 @@ function AISummarySettings({ showMessage }: AISummarySettingsProps) {
             </Alert.Indicator>
             <Alert.Content>
               <Alert.Title>还没有 API Key？</Alert.Title>
-              <Alert.Description>RelayOne 官方中转：一个 Key 直连全模型，国内可用，低于官方价，注册即用。</Alert.Description>
+              <Alert.Description>RelayOne 官方中转：登录自动配置密钥，直连全模型，国内可用，低于官方价。</Alert.Description>
             </Alert.Content>
             <Button
               type="button"
               variant="primary"
               size="sm"
               className="shrink-0 self-center"
-              onPress={() => void window.electronAPI.shell.openExternal('https://hicccc.cc')}
+              onPress={() => void handleSelectProvider('relayone')}
             >
-              注册获取 Key
+              使用
             </Button>
           </Alert>
         )}
@@ -1031,7 +1056,17 @@ function AISummarySettings({ showMessage }: AISummarySettingsProps) {
                     </TextField>
                   )}
 
-                  {!isCodexSubscription && (
+                  {/* RelayOne 密钥全托管，不给输入框；已配置时什么都不显示，未配置时提示去登录 */}
+                  {provider === 'relayone' ? (
+                    !apiKey.trim() && (
+                      <Alert status="warning">
+                        <Alert.Content>
+                          <Alert.Title>尚未配置密钥</Alert.Title>
+                          <Alert.Description>在右侧登录 RelayOne 账户后会自动创建并配置密钥。</Alert.Description>
+                        </Alert.Content>
+                      </Alert>
+                    )
+                  ) : !isCodexSubscription && (
                     <div className="space-y-1">
                       <TextField fullWidth value={apiKey} onChange={(value) => setField('aiApiKey', value)} type={showApiKey ? 'text' : 'password'}>
                         <Label>API 密钥</Label>
@@ -1057,7 +1092,6 @@ function AISummarySettings({ showMessage }: AISummarySettingsProps) {
                           </InputGroup.Suffix>
                         </InputGroup>
                       </TextField>
-                      {provider === 'relayone' && <Description>在 RelayOne 账户卡片中创建 Key 后会自动填入，并刷新模型列表。</Description>}
                     </div>
                   )}
 
@@ -1108,7 +1142,8 @@ function AISummarySettings({ showMessage }: AISummarySettingsProps) {
                       >
                         <Label>模型</Label>
                         <ComboBox.InputGroup>
-                          <Input placeholder="请选择或输入模型名称" variant="secondary" />
+                          {/* 列表为空时 react-aria 不触发 onOpenChange，聚焦事件兜底自动拉取 */}
+                          <Input placeholder="请选择或输入模型名称" variant="secondary" onFocus={maybeAutoLoadModels} />
                           <ComboBox.Trigger />
                         </ComboBox.InputGroup>
                         <ComboBox.Popover>
@@ -1187,26 +1222,33 @@ function AISummarySettings({ showMessage }: AISummarySettingsProps) {
 
               <Card.Content>
               <dl className="space-y-3 text-sm">
-                <div className="flex items-center justify-between gap-3">
-                  <dt className="text-muted">协议</dt>
-                  <dd className="min-w-0">
-                    <Chip size="sm" variant="soft" color="accent" className="max-w-full">
-                      <Chip.Label className="truncate">{formatProtocolLabel(currentProtocol)}</Chip.Label>
-                    </Chip>
-                  </dd>
-                </div>
+                {/* RelayOne 全托管，协议/认证/地址属于内部细节，不展示 */}
+                {provider !== 'relayone' && (
+                  <div className="flex items-center justify-between gap-3">
+                    <dt className="text-muted">协议</dt>
+                    <dd className="min-w-0">
+                      <Chip size="sm" variant="soft" color="accent" className="max-w-full">
+                        <Chip.Label className="truncate">{formatProtocolLabel(currentProtocol)}</Chip.Label>
+                      </Chip>
+                    </dd>
+                  </div>
+                )}
                 <div className="flex items-center justify-between gap-3">
                   <dt className="text-muted">模型</dt>
                   <dd className="truncate font-medium text-foreground">{model || '未选择'}</dd>
                 </div>
-                <div className="flex items-center justify-between gap-3">
-                  <dt className="text-muted">认证</dt>
-                  <dd className="truncate font-medium text-foreground">{isCodexSubscription ? 'ChatGPT 登录' : maskSecret(apiKey)}</dd>
-                </div>
-                <div className="flex items-start justify-between gap-3">
-                  <dt className="shrink-0 text-muted">地址</dt>
-                  <dd className="min-w-0 truncate text-right font-medium text-foreground">{currentBaseURLLabel}</dd>
-                </div>
+                {provider !== 'relayone' && (
+                  <div className="flex items-center justify-between gap-3">
+                    <dt className="text-muted">认证</dt>
+                    <dd className="truncate font-medium text-foreground">{isCodexSubscription ? 'ChatGPT 登录' : maskSecret(apiKey)}</dd>
+                  </div>
+                )}
+                {provider !== 'relayone' && (
+                  <div className="flex items-start justify-between gap-3">
+                    <dt className="shrink-0 text-muted">地址</dt>
+                    <dd className="min-w-0 truncate text-right font-medium text-foreground">{currentBaseURLLabel}</dd>
+                  </div>
+                )}
                 {currentProvider?.website && (
                   <div className="flex items-center justify-between gap-3">
                     <dt className="text-muted">官网</dt>
@@ -1216,7 +1258,7 @@ function AISummarySettings({ showMessage }: AISummarySettingsProps) {
                         className="cursor-pointer font-medium text-accent hover:underline"
                         onClick={() => void window.electronAPI.shell.openExternal(currentProvider.website!)}
                       >
-                        注册 / 获取 Key
+                        {provider === 'relayone' ? '访问官网' : '注册 / 获取 Key'}
                       </button>
                     </dd>
                   </div>
@@ -1484,7 +1526,14 @@ function AISummarySettings({ showMessage }: AISummarySettingsProps) {
                               >
                                 <Label>模型</Label>
                                 <ComboBox.InputGroup>
-                                  <Input placeholder="请选择或输入模型名称" variant="secondary" />
+                                  {/* 列表为空时 react-aria 不触发 onOpenChange，聚焦事件兜底自动拉取 */}
+                                  <Input
+                                    placeholder="请选择或输入模型名称"
+                                    variant="secondary"
+                                    onFocus={() => {
+                                      if (!isLoadingPresetModels && presetRemoteModels.length === 0 && !presetModelListError) void loadPresetDraftModels(false)
+                                    }}
+                                  />
                                   <ComboBox.Trigger />
                                 </ComboBox.InputGroup>
                                 <ComboBox.Popover>
